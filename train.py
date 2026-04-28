@@ -65,6 +65,15 @@ def parse_args():
                     help="Train without L_depth / L_scale (pure L_geo).")
     ap.add_argument("--hflip", action="store_true",
                     help="Enable horizontal flip aug (geometry-safe in our setup).")
+    # detection loss weights
+    ap.add_argument("--w-box", type=float, default=7.5)
+    ap.add_argument("--w-obj", type=float, default=1.0)
+    ap.add_argument("--w-cls", type=float, default=0.5)
+    ap.add_argument("--focal-gamma", type=float, default=1.5,
+                    help="Focal loss gamma for obj/cls BCE (0 = plain BCE).")
+    # resume
+    ap.add_argument("--resume", default=None,
+                    help="Path to checkpoint to resume from (.pt).")
     # λ_geo warmup
     ap.add_argument("--geo-warmup-epochs", type=int, default=10)
     ap.add_argument("--geo-start", type=float, default=0.1)
@@ -106,7 +115,9 @@ def main():
     model = OGCDENet(nc=args.num_classes).to(device)
     criterion = OGCDELoss(
         nc=args.num_classes,
+        det_weights=(args.w_box, args.w_obj, args.w_cls),
         has_depth_gt=not args.no_depth_gt,
+        focal_gamma=args.focal_gamma,
     ).to(device)
 
     optimizer = torch.optim.AdamW(
@@ -117,10 +128,21 @@ def main():
     )
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
 
+    start_epoch = 0
+    if args.resume:
+        ckpt_r = torch.load(args.resume, map_location=device, weights_only=False)
+        model.load_state_dict(ckpt_r["model"])
+        # Không load optimizer state: khi loss weights thay đổi, Adam's second
+        # moment (v) từ run cũ sẽ gây NaN do step size bất thường. Fresh optimizer
+        # với LR mới là an toàn hơn cho fine-tuning.
+        print(f"Resumed weights from {args.resume} "
+              f"(epoch {ckpt_r['epoch']}, val_loss={ckpt_r['val_loss']:.3f})"
+              f" — optimizer reset, lr={args.lr}")
+
     train_loader, val_loader = build_loaders(args)
 
     best_val = float("inf")
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, start_epoch + args.epochs):
         # ------------------- λ_geo warmup -----------------
         lg = lambda_geo_schedule(
             epoch,

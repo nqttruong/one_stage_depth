@@ -33,8 +33,14 @@ from .model import split_pred, make_grid, decode_bbox, decode_contact, decode_de
 # --------------------------- geometric helpers ------------------------------
 
 def ciou_loss(pred_xywh: torch.Tensor, gt_xywh: torch.Tensor) -> torch.Tensor:
-    """CIoU loss for matched pairs. Input shape (N, 4) in xywh pixels."""
+    """CIoU loss for matched pairs. Input shape (N, 4) in xywh pixels.
+
+    Computed in fp32 regardless of autocast: squared pixel distances (up to
+    640^2 = 409600) and iou→1 edge cases make fp16 gradients unstable.
+    """
     eps = 1e-7
+    pred_xywh = pred_xywh.float()
+    gt_xywh   = gt_xywh.float()
 
     p_xy, p_wh = pred_xywh[..., :2], pred_xywh[..., 2:4]
     g_xy, g_wh = gt_xywh[..., :2], gt_xywh[..., 2:4]
@@ -175,7 +181,8 @@ class OGCDELoss(nn.Module):
     def __init__(self, nc=3, strides=(8, 16, 32),
                  lambdas=(1.0, 0.5, 1.0, 2.0),
                  det_weights=(7.5, 1.0, 0.5),
-                 has_depth_gt=True):
+                 has_depth_gt=True,
+                 focal_gamma: float = 1.5):
         super().__init__()
         self.nc = nc
         self.strides = strides
@@ -183,7 +190,21 @@ class OGCDELoss(nn.Module):
         self.lambdas = list(lambdas)
         self.w_box, self.w_obj, self.w_cls = det_weights
         self.has_depth_gt = has_depth_gt
-        self.bce = nn.BCEWithLogitsLoss(reduction="none")
+        self.focal_gamma = focal_gamma  # 0 = plain BCE; >0 = focal
+
+    @staticmethod
+    def _focal_bce(pred: torch.Tensor, target: torch.Tensor,
+                   gamma: float) -> torch.Tensor:
+        """Focal BCE loss (element-wise).
+
+        Down-weights easy negatives so the objectness head is forced to
+        discriminate harder examples.  gamma=0 recovers plain BCE.
+        """
+        ce = F.binary_cross_entropy_with_logits(pred, target, reduction="none")
+        if gamma == 0.0:
+            return ce
+        p_t = torch.sigmoid(pred) * target + (1 - torch.sigmoid(pred)) * (1 - target)
+        return ((1 - p_t) ** gamma) * ce
 
     def set_lambda_geo(self, value: float):
         """Update geometry-loss weight at runtime (used by warmup)."""
@@ -196,6 +217,13 @@ class OGCDELoss(nn.Module):
         targets: dict with keys 'boxes', 'labels', 'dist', 'depth', 'contact',
                  'batch_idx'. All flat across the batch.
         """
+        # Cast predictions to fp32 for loss computation.  The model forward
+        # runs in fp16 (AMP), but fp16 backward through CIoU / focal-BCE /
+        # contact-sqrt produces NaN gradients due to precision limits at
+        # pixel scale (640^2=409600 >> fp16 max 65504) and near-zero denominators.
+        # Casting here is zero-copy when preds are already fp32.
+        preds = [p.float() for p in preds]
+
         device = preds[0].device
         B = preds[0].shape[0]
         feat_shapes = [p.shape[-2:] for p in preds]
@@ -224,7 +252,7 @@ class OGCDELoss(nn.Module):
                 # negative-only image: still contribute obj loss
                 for s_i, dec in enumerate(decoded):
                     obj_t = torch.zeros_like(dec["obj"][b])
-                    obj_loss = obj_loss + self.bce(dec["obj"][b], obj_t).mean()
+                    obj_loss = obj_loss + self._focal_bce(dec["obj"][b], obj_t, self.focal_gamma).mean()
                 continue
 
             gt_boxes = targets["boxes"][mask].to(device)
@@ -244,7 +272,7 @@ class OGCDELoss(nn.Module):
                 obj_t = torch.zeros(H * W, device=device)
                 if len(pos_idx) > 0:
                     obj_t[pos_idx] = 1.0
-                obj_loss = obj_loss + self.bce(dec["obj"][b], obj_t).mean()
+                obj_loss = obj_loss + self._focal_bce(dec["obj"][b], obj_t, self.focal_gamma).mean()
 
                 if len(pos_idx) == 0:
                     continue
@@ -261,7 +289,7 @@ class OGCDELoss(nn.Module):
 
                 # --- classification loss ---
                 cls_t = F.one_hot(gt_labels[gt_idx].long(), self.nc).float()
-                cls_loss = cls_loss + self.bce(dec["cls"][b, pos_idx], cls_t).mean()
+                cls_loss = cls_loss + self._focal_bce(dec["cls"][b, pos_idx], cls_t, 0.5).mean()
 
                 # --- geometry losses ---
                 d_raw = dec["d_raw"][b, pos_idx]
@@ -280,10 +308,11 @@ class OGCDELoss(nn.Module):
                     s_gt = (gt_dist[gt_idx] / gt_depth[gt_idx].clamp(min=1e-3)).clamp(min=1e-3)
                     scale_loss = scale_loss + (s_raw - s_gt.log()).abs().mean()
 
-                # contact point
+                # contact point — fp32 for sqrt gradient stability
                 pred_cp = decode_contact(dxdy_raw, pred_xywh.detach(), stride)
                 contact_loss = contact_loss + (
-                    (pred_cp - gt_contact[gt_idx]).pow(2).sum(-1).clamp(min=1e-6).sqrt()
+                    (pred_cp.float() - gt_contact[gt_idx].float())
+                    .pow(2).sum(-1).clamp(min=1e-4).sqrt()
                 ).mean()
 
                 # geometry consistency: |distance_pred - distance_gt|
