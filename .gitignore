@@ -1,0 +1,23 @@
+# checkpoints & experiment outputs
+runs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# data & cache
+cache/
+*.bin
+*.npy
+*.json.bak
+
+# editor / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
