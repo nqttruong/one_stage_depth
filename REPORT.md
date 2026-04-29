@@ -217,11 +217,21 @@ Config thay đổi so với v1: focal loss (γ=1.5), fp32 loss computation, H-fl
 | **ogcde_v3** (ep 75) | scratch | ON | γ=1.5 | **0.3** | 5,395 | 1.359 | 0.0451 | 98.61% | 6.428 |
 | **ogcde_v4** (ep 143) | **YOLOv8n COCO** | ON | γ=1.5 | 1.0 | 5,206 | 1.348 | 0.0452 | 98.66% | **6.242** |
 
+**Đánh giá công bằng — Fixed Intersection (3,915 pairs được phát hiện bởi CẢ 4 models):**
+
+| Config | Pairs | AbsRel | DE (m) | δ₁ | CPE (px) |
+|---|---|---|---|---|---|
+| **ogcde_v1** | 3,915 | **0.0378** | **1.034** | **99.44%** | 5.575 |
+| **ogcde_v2** | 3,915 | 0.0390 | 1.075 | 99.41% | 5.638 |
+| **ogcde_v3** | 3,915 | 0.0386 | 1.062 | 99.34% | 5.582 |
+| **ogcde_v4** | 3,915 | 0.0398 | 1.116 | 99.21% | **5.439** |
+
 **Nhận xét ablation:**
 
-- **λ_cp (v3):** Giảm λ_cp 1.0→0.3 tăng detections (+8%) nhưng distance metrics xấu hơn. Contact point loss là geometric regularization quan trọng — không nên giảm.
-- **Pretrained backbone (v4):** Cải thiện rõ CPE (6.24px, -1.7% vs v2) và geo loss thấp hơn ~18% so với v2 ở cùng λ_geo=2.0. Tuy nhiên AbsRel và DE không cải thiện so với v2. Lý do: v4 detect nhiều object hơn v2 (+5%), bao gồm các object khó hơn (xa, nhỏ) vốn có sai số cao hơn, kéo DE trung bình lên. Pretrained backbone thực sự giúp ích về feature quality (thấy qua CPE và geo loss) nhưng bị che khuất bởi hiệu ứng recall tăng.
-- **Xu hướng chung:** v1 có ít detections nhất (4,257) và metrics tốt nhất — không phải vì v1 tốt hơn thực sự mà vì nó bỏ sót nhiều object khó hơn. Metric DE/AbsRel phụ thuộc mạnh vào recall của detector.
+- **Recall confounding:** So sánh trên full set bị nhiễu bởi recall. v1 "tốt nhất" trên full set chỉ vì nó bỏ sót nhiều object khó — DE/AbsRel trên tập riêng của nó dễ hơn. Trên intersection 3,915 pairs, gap thu hẹp đáng kể: v1→v4 chỉ còn 0.082m thay vì 0.241m.
+- **λ_cp (v3):** Trên intersection, v3 TỐTHƠN v2 về DE (1.062 vs 1.075m) — nghĩa là giảm λ_cp thực sự giúp distance accuracy trên các object chung. Nhưng nó làm model bỏ sót thêm objects khó, kéo full-set DE lên. Trade-off: precision↑ recall↓.
+- **Pretrained backbone (v4):** CPE tốt nhất trên intersection (5.44px) — xác nhận pretrained features cải thiện contact point geometry. AbsRel và DE kém hơn v1/v2/v3 trên intersection: backbone pretrained giúp detect nhiều hơn nhưng chưa fine-tune đủ sâu cho KITTI distance regression.
+- **Kết luận:** Không có model nào rõ ràng tốt nhất trên mọi metric. v1 tốt nhất về distance accuracy, v4 tốt nhất về contact point geometry.
 
 ### 4.4 So sánh với paper liên quan — CDR
 
