@@ -129,20 +129,26 @@ def main():
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda")
 
     start_epoch = 0
+    best_val = float("inf")
     if args.resume:
         ckpt_r = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(ckpt_r["model"])
+        start_epoch = ckpt_r["epoch"] + 1
+        best_val = ckpt_r.get("best_val", ckpt_r["val_loss"])
+        # Scheduler restarted fresh (last_epoch=-1 = LR starts at args.lr).
+        # Do NOT fast-forward: the old run may have used a different T_max,
+        # fast-forwarding would reset LR to near-max and cause divergence.
         # Không load optimizer state: khi loss weights thay đổi, Adam's second
         # moment (v) từ run cũ sẽ gây NaN do step size bất thường. Fresh optimizer
         # với LR mới là an toàn hơn cho fine-tuning.
         print(f"Resumed weights from {args.resume} "
-              f"(epoch {ckpt_r['epoch']}, val_loss={ckpt_r['val_loss']:.3f})"
+              f"(epoch {ckpt_r['epoch']} → continue from {start_epoch}, "
+              f"val_loss={ckpt_r['val_loss']:.3f}, best_val={best_val:.3f})"
               f" — optimizer reset, lr={args.lr}")
 
     train_loader, val_loader = build_loaders(args)
 
-    best_val = float("inf")
-    for epoch in range(start_epoch, start_epoch + args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         # ------------------- λ_geo warmup -----------------
         lg = lambda_geo_schedule(
             epoch,
@@ -169,9 +175,19 @@ def main():
                 preds = model(imgs)
                 loss, comp = criterion(preds, targets)
 
+            if not torch.isfinite(loss):
+                print(f"  [warn] non-finite loss ({loss.item():.3g}), skipping batch")
+                scaler.update()
+                continue
+
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+            if not torch.isfinite(grad_norm):
+                print(f"  [warn] non-finite grad norm, skipping update")
+                optimizer.zero_grad(set_to_none=True)
+                scaler.update()
+                continue
             scaler.step(optimizer)
             scaler.update()
 
@@ -210,16 +226,19 @@ def main():
         print(f"[epoch {epoch+1:03d}] val total={vloss:.3f}")
 
         # ------------------- checkpoint -------------------
+        is_best = vloss < best_val
+        if is_best:
+            best_val = vloss
         ckpt = {
             "epoch": epoch,
             "model": model.state_dict(),
             "optim": optimizer.state_dict(),
             "val_loss": vloss,
+            "best_val": best_val,
             "args": vars(args),
         }
         torch.save(ckpt, os.path.join(args.save_dir, "last.pt"))
-        if vloss < best_val:
-            best_val = vloss
+        if is_best:
             torch.save(ckpt, os.path.join(args.save_dir, "best.pt"))
             print(f"  -> new best ({best_val:.3f})")
 

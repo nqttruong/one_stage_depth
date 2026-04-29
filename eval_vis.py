@@ -14,8 +14,8 @@ Hai chế độ:
 Mỗi ảnh annotated được lưu với tên gốc + hậu tố _vis.jpg.
 
 Thông tin hiển thị trên mỗi box:
-    [class]  [distance]m  [W]x[H]px
-    Ví dụ:  Car  14.3m  132x74px
+    [class]  [distance]m
+    Ví dụ:  Car  14.3m
 
 Legend màu:
     Car        → xanh lá   (0, 200, 0)
@@ -120,14 +120,11 @@ def draw_predictions(img: np.ndarray, dets: dict) -> np.ndarray:
         cid   = int(classes[i])
         color = CLASS_COLORS.get(cid, (180, 180, 180))
         dist  = float(dists[i])
-        w_px  = max(1, int(w))
-        h_px  = max(1, int(h))
 
         # bbox
         cv2.rectangle(vis, (x1, y1), (x2, y2), color, 2)
 
-        # label: "Car 14.3m 132x74px"
-        label = f"{CLASSES[cid]}  {dist:.1f}m  {w_px}x{h_px}px"
+        label = f"{CLASSES[cid]}  {dist:.1f}m"
         _put_label(vis, label, x1, y1, color)
 
         # contact point

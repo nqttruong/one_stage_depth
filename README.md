@@ -97,7 +97,7 @@ python evaluate_kitti.py \
 ### Run on video (with stability metric)
 
 ```bash
-python inference.py --ckpt runs/ogcde/best.pt --source clip.mp4 --save-video
+python inference.py --ckpt runs/ogcde_v2/best.pt --source /media/truong/01DBB45ECE0C4E00/dl/one_stage_depth/video/12207144_1920_1080_30fps.mp4
 ```
 
 ## Configuration decisions (locked-in)

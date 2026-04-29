@@ -180,20 +180,43 @@ Split được tạo bằng `split_kitti.py` với random seed=0, val_frac=0.2.
 | RMSE_log | 0.0642 |
 | δ₁ | 99.30% |
 
-### 4.2 Ablation — trạng thái hiện tại
+### 4.2 Kết quả — `runs/ogcde_v2/best.pt` (epoch 63)
 
-Hiện chỉ có **một cấu hình đã chạy đủ** (stage-1, 100 epochs). Bảng dưới đây liệt kê các trục ablation đã thiết kế trong codebase nhưng chưa có số liệu thực nghiệm:
+Config thay đổi so với v1: focal loss (γ=1.5), fp32 loss computation, H-flip, `--w-box 5.0 --w-obj 2.0 --w-cls 0.5`, lr=5e-5.
 
-| Config | Depth GT | H-flip | λ_geo warmup | Val loss | DE (m) | AbsRel |
-|---|---|---|---|---|---|---|
-| **ogcde_v1 (đã chạy)** | bottom-Z | OFF | 0.1→2.0/10ep | **16.242** | **1.107** | **0.0402** |
-| stage-2 LiDAR (chưa chạy) | median LiDAR-Z | OFF | — | — | — | — |
-| + H-flip (chưa chạy) | bottom-Z | ON | — | — | — | — |
-| no geo-warmup (chưa chạy) | bottom-Z | OFF | fixed λ=2.0 | — | — | — |
+**Distance metrics** (euclidean `sqrt(x²+y²+z²)`, 4,971 matched pairs):
 
-Để có bảng ablation đầy đủ, cần chạy thêm stage-2 và các biến thể.
+| Metric | Giá trị |
+|---|---|
+| AbsRel | 0.0438 |
+| RMSE | 2.096 m |
+| RMSE_log | 0.0656 |
+| δ₁ (< 1.25) | 98.85% |
+| δ₂ (< 1.25²) | 99.96% |
+| δ₃ (< 1.25³) | 100.00% |
+| DE | 1.295 m |
+| CPE | 6.353 px |
 
-### 4.3 So sánh với paper liên quan — CDR
+**Depth metrics** (Z-depth `d`):
+
+| Metric | Giá trị |
+|---|---|
+| AbsRel | 0.0485 |
+| RMSE | 2.121 m |
+| RMSE_log | 0.0705 |
+| δ₁ | 98.79% |
+
+**Nhận xét v2 vs v1:** v2 detect được nhiều object hơn (4,971 vs 4,257 matched pairs, +17%) nhờ focal loss và loss weight tuning. Tuy nhiên các distance metrics tuyệt đối kém hơn v1 — nhiều khả năng vì v2 detect thêm các object khó (xa, nhỏ) vốn có sai số distance cao hơn, kéo DE và AbsRel lên. Val loss không so sánh trực tiếp được giữa v1 và v2 do thay đổi loss function.
+
+### 4.3 Ablation — trạng thái hiện tại
+
+| Config | Depth GT | H-flip | Focal | Val loss | Pairs | DE (m) | AbsRel | δ₁ |
+|---|---|---|---|---|---|---|---|---|
+| **ogcde_v1** (ep 98) | bottom-Z | OFF | OFF | 16.242 | 4,257 | **1.107** | **0.0402** | **99.22%** |
+| **ogcde_v2** (ep 63) | bottom-Z | ON | γ=1.5 | 14.727 | 4,971 | 1.295 | 0.0438 | 98.85% |
+| stage-2 LiDAR (chưa chạy) | median LiDAR-Z | ON | — | — | — | — | — | — |
+
+### 4.4 So sánh với paper liên quan — CDR
 
 Paper tham chiếu: **"Supervised Object-Specific Distance Estimation from Monocular Images for Autonomous Driving"** (PMC9693490), phương pháp CDR (Convolutional Depth Regression), backbone ConvNeXt-small, huấn luyện supervised trên KITTI.
 
@@ -202,12 +225,13 @@ Paper tham chiếu: **"Supervised Object-Specific Distance Estimation from Monoc
 | CDR | ConvNeXt + optics decoder | wMAE | 1.93 ± 0.03 m | KITTI |
 | Monodepth2 (baseline của CDR) | ResNet + decoder | wMAE | 2.28 m | KITTI |
 | **OGCDE v1 (ours)** | YOLOv8n-scale + PAN-FPN | DE (MAE) | **1.107 m** | KITTI |
+| **OGCDE v2 (ours)** | YOLOv8n-scale + PAN-FPN | DE (MAE) | 1.295 m | KITTI |
 
 **Lưu ý về so sánh:** CDR dùng wMAE (weighted MAE có trọng số theo khoảng cách) trên toàn bộ objects. OGCDE dùng DE (unweighted MAE) chỉ trên IoU>0.5 matched pairs — các objects không detect được không tính vào DE, khiến DE có lợi thế hơn wMAE về mặt tính toán. So sánh trực tiếp cần chạy cùng evaluation protocol.
 
 **Bối cảnh thêm từ YOLO MDE (Electronics 2022, MDPI):** Một pipeline tương tự (YOLOv4 + depth head) đạt mean error rate 3.71% trên KITTI 3D Object Detection, AP 71.68% (Car). OGCDE tiếp cận khác biệt ở chỗ không dùng depth map dày đặc làm trung gian.
 
-### 4.4 Phân tích đóng góp
+### 4.5 Phân tích đóng góp
 
 **Đóng góp nào quan trọng nhất?** Geometric scale factor `s`:
 
@@ -224,7 +248,7 @@ Paper tham chiếu: **"Supervised Object-Specific Distance Estimation from Monoc
 
 - **Pipeline đơn giản:** Một forward pass cho cả detection + distance, không cần depth map trung gian.
 - **Geometry-aware:** Scale factor `s` được học ngầm từ dữ liệu, không cần camera calibration tại inference.
-- **Kết quả tốt ở stage-1:** AbsRel = 0.040, δ₁ = 99.2% sau 100 epoch với backbone từ scratch.
+- **Kết quả tốt ở stage-1:** AbsRel = 0.040, δ₁ = 99.2% (v1) — 0.044, δ₁ = 98.9% (v2) sau ~100 epoch với backbone từ scratch. v2 detect nhiều object hơn (+17% matched pairs) nhờ focal loss.
 - **Code sạch:** Không phụ thuộc Ultralytics hay mmdet; chỉ cần `torch`, `torchvision`, `numpy`, `opencv`.
 
 ### Hạn chế hiện tại
@@ -278,7 +302,7 @@ python prepare_lidar_depth.py \
     --out cache/kitti_train_lidar.json
 
 # Inference trên video
-python inference.py --ckpt runs/ogcde_v1/best.pt --source <video.mp4> --save-video
+python inference.py --ckpt runs/ogcde_v2/best.pt --source /media/truong/01DBB45ECE0C4E00/dl/one_stage_depth/video/12207144_1920_1080_30fps.mp4
 ```
 
 ### 6.2 Cấu trúc thư mục
