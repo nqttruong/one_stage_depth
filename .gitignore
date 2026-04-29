@@ -1,6 +1,9 @@
 # checkpoints & experiment outputs
 runs/
 
+# pretrained weights (large files, download on demand)
+yolov8n.pt
+
 # Python
 __pycache__/
 *.py[cod]

@@ -78,6 +78,13 @@ def parse_args():
     # resume
     ap.add_argument("--resume", default=None,
                     help="Path to checkpoint to resume from (.pt).")
+    # pretrained backbone
+    ap.add_argument("--pretrained-backbone", default=None, metavar="PATH",
+                    help="Path to yolov8n.pt. Transplants backbone weights before "
+                         "training. Ignored when --resume is set.")
+    ap.add_argument("--freeze-backbone-epochs", type=int, default=10,
+                    help="Freeze backbone for this many epochs so Neck+Head "
+                         "stabilise first. 0 = no freezing.")
     # λ_geo warmup
     ap.add_argument("--geo-warmup-epochs", type=int, default=10)
     ap.add_argument("--geo-start", type=float, default=0.1)
@@ -125,9 +132,25 @@ def main():
         focal_gamma=args.focal_gamma,
     ).to(device)
 
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
-    )
+    # Load pretrained backbone before optimizer init (so frozen params are excluded)
+    if args.pretrained_backbone and not args.resume:
+        model.load_pretrained_backbone(args.pretrained_backbone)
+        if args.freeze_backbone_epochs > 0:
+            for p in model.backbone.parameters():
+                p.requires_grad_(False)
+            print(f"[pretrained] backbone frozen for first {args.freeze_backbone_epochs} epochs")
+
+    # Neck+Head params always train; backbone params added back after freeze period
+    neck_head_params = list(model.neck.parameters()) + list(model.head.parameters())
+    backbone_params  = list(model.backbone.parameters())
+    if args.pretrained_backbone and not args.resume and args.freeze_backbone_epochs > 0:
+        optimizer = torch.optim.AdamW(
+            neck_head_params, lr=args.lr, weight_decay=args.weight_decay,
+        )
+    else:
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=args.lr, weight_decay=args.weight_decay,
+        )
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=args.epochs,
     )
@@ -154,6 +177,19 @@ def main():
     train_loader, val_loader = build_loaders(args)
 
     for epoch in range(start_epoch, args.epochs):
+        # ------------------- unfreeze backbone ---------------
+        if (args.pretrained_backbone and not args.resume
+                and args.freeze_backbone_epochs > 0
+                and epoch == args.freeze_backbone_epochs):
+            for p in model.backbone.parameters():
+                p.requires_grad_(True)
+            optimizer.add_param_group({
+                "params": backbone_params,
+                "lr": args.lr * 0.1,
+                "weight_decay": args.weight_decay,
+            })
+            print(f"[epoch {epoch+1:03d}] backbone unfrozen (lr={args.lr*0.1:.2e})")
+
         # ------------------- λ_geo warmup -----------------
         lg = lambda_geo_schedule(
             epoch,

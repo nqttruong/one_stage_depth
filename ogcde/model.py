@@ -178,6 +178,29 @@ class OGCDENet(nn.Module):
         f3, f4, f5 = self.neck(p3, p4, p5)
         return self.head([f3, f4, f5])
 
+    def load_pretrained_backbone(self, yolov8n_path: str) -> None:
+        """Transplant YOLOv8n COCO backbone weights into self.backbone.
+
+        Layer shapes are identical (both YOLOv8n-scale, width=(16,32,64,128,256)).
+        ultralytics is only needed here — not at inference time.
+        """
+        from ultralytics import YOLO
+        src = YOLO(yolov8n_path).model.state_dict()
+        prefix_map = {
+            "stem":    "model.0",
+            "dark2.0": "model.1", "dark2.1": "model.2",
+            "dark3.0": "model.3", "dark3.1": "model.4",
+            "dark4.0": "model.5", "dark4.1": "model.6",
+            "dark5.0": "model.7", "dark5.1": "model.8", "dark5.2": "model.9",
+        }
+        mapped = {}
+        for ogcde_pfx, yolo_pfx in prefix_map.items():
+            for k, v in src.items():
+                if k.startswith(yolo_pfx + "."):
+                    mapped[ogcde_pfx + k[len(yolo_pfx):]] = v
+        self.backbone.load_state_dict(mapped, strict=True)
+        print(f"[pretrained] loaded {len(mapped)} backbone tensors from {yolov8n_path}")
+
 
 # ----------------------------- decoding helpers ------------------------------
 
