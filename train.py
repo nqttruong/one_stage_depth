@@ -69,6 +69,10 @@ def parse_args():
     ap.add_argument("--w-box", type=float, default=7.5)
     ap.add_argument("--w-obj", type=float, default=1.0)
     ap.add_argument("--w-cls", type=float, default=0.5)
+    # geometry loss lambdas
+    ap.add_argument("--w-cp", type=float, default=1.0,
+                    help="λ_contact weight (default 1.0). Set lower (e.g. 0.3) to "
+                         "reduce contact-point dominance in total loss.")
     ap.add_argument("--focal-gamma", type=float, default=1.5,
                     help="Focal loss gamma for obj/cls BCE (0 = plain BCE).")
     # resume
@@ -115,6 +119,7 @@ def main():
     model = OGCDENet(nc=args.num_classes).to(device)
     criterion = OGCDELoss(
         nc=args.num_classes,
+        lambdas=(1.0, 0.5, args.w_cp, 2.0),
         det_weights=(args.w_box, args.w_obj, args.w_cls),
         has_depth_gt=not args.no_depth_gt,
         focal_gamma=args.focal_gamma,
