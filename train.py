@@ -202,17 +202,20 @@ def main():
 
         scheduler.step()
         dt = time.time() - t0
-        print(
-            f"[epoch {epoch+1:03d}] λ_geo={lg:.2f} train {dt:.1f}s"
-            f" | total {run['total']/n_iters:.3f}"
-            f" box {run['box']/n_iters:.3f}"
-            f" obj {run['obj']/n_iters:.3f}"
-            f" cls {run['cls']/n_iters:.3f}"
-            f" d {run['depth']/n_iters:.3f}"
-            f" s {run['scale']/n_iters:.3f}"
-            f" cp {run['contact']/n_iters:.3f}"
-            f" geo {run['geo']/n_iters:.3f}"
-        )
+        if n_iters == 0:
+            print(f"[epoch {epoch+1:03d}] λ_geo={lg:.2f} train {dt:.1f}s | [warn] all batches skipped")
+        else:
+            print(
+                f"[epoch {epoch+1:03d}] λ_geo={lg:.2f} train {dt:.1f}s"
+                f" | total {run['total']/n_iters:.3f}"
+                f" box {run['box']/n_iters:.3f}"
+                f" obj {run['obj']/n_iters:.3f}"
+                f" cls {run['cls']/n_iters:.3f}"
+                f" d {run['depth']/n_iters:.3f}"
+                f" s {run['scale']/n_iters:.3f}"
+                f" cp {run['contact']/n_iters:.3f}"
+                f" geo {run['geo']/n_iters:.3f}"
+            )
 
         # ------------------- validate ---------------------
         model.eval()
