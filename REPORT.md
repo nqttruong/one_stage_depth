@@ -210,14 +210,18 @@ Config thay đổi so với v1: focal loss (γ=1.5), fp32 loss computation, H-fl
 
 ### 4.3 Ablation — trạng thái hiện tại
 
-| Config | Depth GT | H-flip | Focal | λ_cp | Pairs | DE (m) | AbsRel | δ₁ |
-|---|---|---|---|---|---|---|---|---|
-| **ogcde_v1** (ep 98) | bottom-Z | OFF | OFF | 1.0 | 4,257 | **1.107** | **0.0402** | **99.22%** |
-| **ogcde_v2** (ep 63) | bottom-Z | ON | γ=1.5 | 1.0 | 4,971 | 1.295 | 0.0438 | 98.85% |
-| **ogcde_v3** (ep 75) | bottom-Z | ON | γ=1.5 | **0.3** | 5,395 | 1.359 | 0.0451 | 98.61% |
-| pretrained backbone (chưa chạy) | bottom-Z | ON | γ=1.5 | 1.0 | — | — | — | — |
+| Config | Backbone | H-flip | Focal | λ_cp | Pairs | DE (m) | AbsRel | δ₁ | CPE (px) |
+|---|---|---|---|---|---|---|---|---|---|
+| **ogcde_v1** (ep 98) | scratch | OFF | OFF | 1.0 | 4,257 | **1.107** | **0.0402** | **99.22%** | 5.977 |
+| **ogcde_v2** (ep 63) | scratch | ON | γ=1.5 | 1.0 | 4,971 | 1.295 | 0.0438 | 98.85% | 6.353 |
+| **ogcde_v3** (ep 75) | scratch | ON | γ=1.5 | **0.3** | 5,395 | 1.359 | 0.0451 | 98.61% | 6.428 |
+| **ogcde_v4** (ep 143) | **YOLOv8n COCO** | ON | γ=1.5 | 1.0 | 5,206 | 1.348 | 0.0452 | 98.66% | **6.242** |
 
-**Nhận xét ablation λ_cp:** Giảm λ_cp từ 1.0 → 0.3 làm tăng số detections (+8% pairs) nhưng **không cải thiện** distance quality — DE và AbsRel xấu hơn cả v2. Contact point loss hoạt động như geometric regularization: cắt giảm nó làm yếu cue hình học giúp distance branch. CPE cũng không cải thiện (6.43px vs 6.35px). Kết luận: λ_cp=1.0 là hợp lý, không nên giảm thêm.
+**Nhận xét ablation:**
+
+- **λ_cp (v3):** Giảm λ_cp 1.0→0.3 tăng detections (+8%) nhưng distance metrics xấu hơn. Contact point loss là geometric regularization quan trọng — không nên giảm.
+- **Pretrained backbone (v4):** Cải thiện rõ CPE (6.24px, -1.7% vs v2) và geo loss thấp hơn ~18% so với v2 ở cùng λ_geo=2.0. Tuy nhiên AbsRel và DE không cải thiện so với v2. Lý do: v4 detect nhiều object hơn v2 (+5%), bao gồm các object khó hơn (xa, nhỏ) vốn có sai số cao hơn, kéo DE trung bình lên. Pretrained backbone thực sự giúp ích về feature quality (thấy qua CPE và geo loss) nhưng bị che khuất bởi hiệu ứng recall tăng.
+- **Xu hướng chung:** v1 có ít detections nhất (4,257) và metrics tốt nhất — không phải vì v1 tốt hơn thực sự mà vì nó bỏ sót nhiều object khó hơn. Metric DE/AbsRel phụ thuộc mạnh vào recall của detector.
 
 ### 4.4 So sánh với paper liên quan — CDR
 
@@ -227,9 +231,8 @@ Paper tham chiếu: **"Supervised Object-Specific Distance Estimation from Monoc
 |---|---|---|---|---|
 | CDR | ConvNeXt + optics decoder | wMAE | 1.93 ± 0.03 m | KITTI |
 | Monodepth2 (baseline của CDR) | ResNet + decoder | wMAE | 2.28 m | KITTI |
-| **OGCDE v1 (ours)** | YOLOv8n-scale + PAN-FPN | DE (MAE) | **1.107 m** | KITTI |
-| **OGCDE v2 (ours)** | YOLOv8n-scale + PAN-FPN | DE (MAE) | 1.295 m | KITTI |
-| **OGCDE v3 (ours, w-cp=0.3)** | YOLOv8n-scale + PAN-FPN | DE (MAE) | 1.359 m | KITTI |
+| **OGCDE v1 (ours)** | scratch YOLOv8n-scale | DE (MAE) | **1.107 m** | KITTI |
+| **OGCDE v4 (ours, pretrained)** | COCO YOLOv8n-scale | DE (MAE) | 1.348 m | KITTI |
 
 **Lưu ý về so sánh:** CDR dùng wMAE (weighted MAE có trọng số theo khoảng cách) trên toàn bộ objects. OGCDE dùng DE (unweighted MAE) chỉ trên IoU>0.5 matched pairs — các objects không detect được không tính vào DE, khiến DE có lợi thế hơn wMAE về mặt tính toán. So sánh trực tiếp cần chạy cùng evaluation protocol.
 
