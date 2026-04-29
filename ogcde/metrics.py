@@ -146,6 +146,126 @@ def stability(tracks: Dict[int, List[float]]) -> float:
     return float(np.mean(variances))
 
 
+# ---------------------------- mAP -------------------------------------------
+
+def compute_ap(recalls: np.ndarray, precisions: np.ndarray) -> float:
+    """VOC 2010+ style AP: area under the precision-recall curve.
+
+    Precision is interpolated as the max precision at any recall >= r
+    (monotone envelope), then integrated via trapezoidal rule.
+    """
+    # append sentinel values
+    r = np.concatenate([[0.0], recalls, [1.0]])
+    p = np.concatenate([[1.0], precisions, [0.0]])
+    # monotone envelope (right-to-left max)
+    p = np.maximum.accumulate(p[::-1])[::-1]
+    # area under curve
+    idx = np.where(r[1:] != r[:-1])[0]
+    return float(np.sum((r[idx + 1] - r[idx]) * p[idx + 1]))
+
+
+class MAPEvaluator:
+    """PASCAL VOC-style mAP@IoU evaluator.
+
+    Collects all predictions and GT boxes across the dataset, then computes
+    per-class AP and mean AP.
+
+    Usage::
+        ev = MAPEvaluator(num_classes=3, iou_thr=0.5)
+        for pred, gt in ...:
+            ev.update(pred, gt, img_id)
+        result = ev.compute()   # {"mAP": ..., "AP": [ap0, ap1, ap2]}
+    """
+
+    def __init__(self, num_classes: int = 3, iou_thr: float = 0.5):
+        self.num_classes = num_classes
+        self.iou_thr = iou_thr
+        self.reset()
+
+    def reset(self):
+        # per-class lists of (score, img_id, pred_box_xyxy)
+        self._preds: list[list] = [[] for _ in range(self.num_classes)]
+        # per (img_id, class): list of gt_box_xyxy (as list for hashing)
+        self._gts: dict = {}
+        self._n_gt = np.zeros(self.num_classes, dtype=np.int64)
+
+    def update(self, pred: dict, gt: dict, img_id):
+        """
+        pred: boxes (xywh), scores, classes  (numpy)
+        gt:   boxes (xywh), labels           (numpy)
+        img_id: any hashable identifier for this image.
+        """
+        g_xyxy = xywh_to_xyxy(np.asarray(gt["boxes"]))
+        g_labels = np.asarray(gt["labels"])
+
+        for c in range(self.num_classes):
+            gt_mask = g_labels == c
+            boxes_c = g_xyxy[gt_mask]
+            key = (img_id, c)
+            self._gts[key] = boxes_c  # (n_gt_c, 4)
+            self._n_gt[c] += int(gt_mask.sum())
+
+        p_boxes  = xywh_to_xyxy(np.asarray(pred["boxes"]))
+        p_scores = np.asarray(pred["scores"])
+        p_cls    = np.asarray(pred["classes"])
+
+        for i in range(len(p_boxes)):
+            c = int(p_cls[i])
+            if 0 <= c < self.num_classes:
+                self._preds[c].append((float(p_scores[i]), img_id, p_boxes[i]))
+
+    def compute(self) -> dict:
+        aps = []
+        for c in range(self.num_classes):
+            preds_c = self._preds[c]
+            if self._n_gt[c] == 0:
+                aps.append(float("nan"))
+                continue
+            if len(preds_c) == 0:
+                aps.append(0.0)
+                continue
+
+            # sort descending by score
+            preds_c.sort(key=lambda x: -x[0])
+
+            # track which GT boxes have been matched per image
+            matched: dict = {}  # (img_id, c) -> bool array
+
+            tp = np.zeros(len(preds_c))
+            fp = np.zeros(len(preds_c))
+
+            for i, (score, img_id, pbox) in enumerate(preds_c):
+                key = (img_id, c)
+                gt_boxes = self._gts.get(key, np.zeros((0, 4)))
+
+                if len(gt_boxes) == 0:
+                    fp[i] = 1
+                    continue
+
+                if key not in matched:
+                    matched[key] = np.zeros(len(gt_boxes), dtype=bool)
+
+                ious = bbox_iou_xyxy(pbox[None], gt_boxes)[0]  # (n_gt,)
+                ious[matched[key]] = -1  # mask already-matched GT
+                best = int(np.argmax(ious))
+
+                if ious[best] >= self.iou_thr:
+                    tp[i] = 1
+                    matched[key][best] = True
+                else:
+                    fp[i] = 1
+
+            cum_tp = np.cumsum(tp)
+            cum_fp = np.cumsum(fp)
+            recalls    = cum_tp / (self._n_gt[c] + 1e-9)
+            precisions = cum_tp / (cum_tp + cum_fp + 1e-9)
+            aps.append(compute_ap(recalls, precisions))
+
+        valid_aps = [a for a in aps if not np.isnan(a)]
+        mAP = float(np.mean(valid_aps)) if valid_aps else float("nan")
+        return {"mAP": mAP, "AP_per_class": aps}
+
+
 # ---------------------------- aggregate over dataset -----------------------
 
 class OGCDEEvaluator:

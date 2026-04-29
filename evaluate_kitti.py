@@ -24,7 +24,7 @@ from torch.utils.data import DataLoader
 from ogcde.model import OGCDENet
 from ogcde.dataset import KITTIOGCDEDataset, collate_ogcde
 from ogcde.utils import decode_predictions, unletterbox_boxes, unletterbox_points
-from ogcde.metrics import OGCDEEvaluator
+from ogcde.metrics import OGCDEEvaluator, MAPEvaluator
 
 
 def parse_args():
@@ -64,6 +64,7 @@ def main():
     )
 
     evaluator = OGCDEEvaluator(iou_thr=args.iou_thr, class_agnostic=False)
+    map_eval  = MAPEvaluator(num_classes=args.num_classes, iou_thr=args.iou_thr)
 
     with torch.no_grad():
         for imgs, targets, meta in loader:
@@ -105,11 +106,19 @@ def main():
                     "contact": pred_contact,
                 }
                 evaluator.update(pred, gt)
+                map_eval.update(pred, gt, img_id=m["image_id"])
 
-    result = evaluator.compute()
+    result  = evaluator.compute()
+    map_res = map_eval.compute()
+    result["mAP"] = map_res
+    CLASS_NAMES = ["Vehicle", "Pedestrian", "Cyclist"]
 
     print("=" * 60)
     print(f"Matched pairs: {result['n_matched']}")
+    print("\n[Detection — mAP@0.5]")
+    for i, (name, ap) in enumerate(zip(CLASS_NAMES, map_res["AP_per_class"])):
+        print(f"  AP {name:<12s} = {ap:.4f}")
+    print(f"  mAP                = {map_res['mAP']:.4f}")
     print("\n[Distance metrics]")
     for k, v in result["distance"].items():
         print(f"  {k:10s} = {v:.4f}" if isinstance(v, float) else f"  {k:10s} = {v}")
