@@ -210,11 +210,14 @@ Config thay đổi so với v1: focal loss (γ=1.5), fp32 loss computation, H-fl
 
 ### 4.3 Ablation — trạng thái hiện tại
 
-| Config | Depth GT | H-flip | Focal | Val loss | Pairs | DE (m) | AbsRel | δ₁ |
+| Config | Depth GT | H-flip | Focal | λ_cp | Pairs | DE (m) | AbsRel | δ₁ |
 |---|---|---|---|---|---|---|---|---|
-| **ogcde_v1** (ep 98) | bottom-Z | OFF | OFF | 16.242 | 4,257 | **1.107** | **0.0402** | **99.22%** |
-| **ogcde_v2** (ep 63) | bottom-Z | ON | γ=1.5 | 14.727 | 4,971 | 1.295 | 0.0438 | 98.85% |
-| stage-2 LiDAR (chưa chạy) | median LiDAR-Z | ON | — | — | — | — | — | — |
+| **ogcde_v1** (ep 98) | bottom-Z | OFF | OFF | 1.0 | 4,257 | **1.107** | **0.0402** | **99.22%** |
+| **ogcde_v2** (ep 63) | bottom-Z | ON | γ=1.5 | 1.0 | 4,971 | 1.295 | 0.0438 | 98.85% |
+| **ogcde_v3** (ep 75) | bottom-Z | ON | γ=1.5 | **0.3** | 5,395 | 1.359 | 0.0451 | 98.61% |
+| pretrained backbone (chưa chạy) | bottom-Z | ON | γ=1.5 | 1.0 | — | — | — | — |
+
+**Nhận xét ablation λ_cp:** Giảm λ_cp từ 1.0 → 0.3 làm tăng số detections (+8% pairs) nhưng **không cải thiện** distance quality — DE và AbsRel xấu hơn cả v2. Contact point loss hoạt động như geometric regularization: cắt giảm nó làm yếu cue hình học giúp distance branch. CPE cũng không cải thiện (6.43px vs 6.35px). Kết luận: λ_cp=1.0 là hợp lý, không nên giảm thêm.
 
 ### 4.4 So sánh với paper liên quan — CDR
 
@@ -226,6 +229,7 @@ Paper tham chiếu: **"Supervised Object-Specific Distance Estimation from Monoc
 | Monodepth2 (baseline của CDR) | ResNet + decoder | wMAE | 2.28 m | KITTI |
 | **OGCDE v1 (ours)** | YOLOv8n-scale + PAN-FPN | DE (MAE) | **1.107 m** | KITTI |
 | **OGCDE v2 (ours)** | YOLOv8n-scale + PAN-FPN | DE (MAE) | 1.295 m | KITTI |
+| **OGCDE v3 (ours, w-cp=0.3)** | YOLOv8n-scale + PAN-FPN | DE (MAE) | 1.359 m | KITTI |
 
 **Lưu ý về so sánh:** CDR dùng wMAE (weighted MAE có trọng số theo khoảng cách) trên toàn bộ objects. OGCDE dùng DE (unweighted MAE) chỉ trên IoU>0.5 matched pairs — các objects không detect được không tính vào DE, khiến DE có lợi thế hơn wMAE về mặt tính toán. So sánh trực tiếp cần chạy cùng evaluation protocol.
 
