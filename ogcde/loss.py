@@ -182,7 +182,8 @@ class OGCDELoss(nn.Module):
                  lambdas=(1.0, 0.5, 1.0, 2.0),
                  det_weights=(7.5, 1.0, 0.5),
                  has_depth_gt=True,
-                 focal_gamma: float = 1.5):
+                 focal_gamma: float = 1.5,
+                 cls_weights=None):
         super().__init__()
         self.nc = nc
         self.strides = strides
@@ -191,6 +192,12 @@ class OGCDELoss(nn.Module):
         self.w_box, self.w_obj, self.w_cls = det_weights
         self.has_depth_gt = has_depth_gt
         self.focal_gamma = focal_gamma  # 0 = plain BCE; >0 = focal
+        # Per-class weight for cls loss: up-weight rare classes (e.g. Cyclist)
+        if cls_weights is not None:
+            w = torch.tensor(cls_weights, dtype=torch.float32)
+            self.register_buffer("cls_weights", w / w.mean())  # normalise so total scale is preserved
+        else:
+            self.register_buffer("cls_weights", torch.ones(nc))
 
     @staticmethod
     def _focal_bce(pred: torch.Tensor, target: torch.Tensor,
@@ -289,7 +296,9 @@ class OGCDELoss(nn.Module):
 
                 # --- classification loss ---
                 cls_t = F.one_hot(gt_labels[gt_idx].long(), self.nc).float()
-                cls_loss = cls_loss + self._focal_bce(dec["cls"][b, pos_idx], cls_t, 0.5).mean()
+                per_cell = self._focal_bce(dec["cls"][b, pos_idx], cls_t, 0.5).mean(-1)  # (N,)
+                sample_w = self.cls_weights[gt_labels[gt_idx].long()]
+                cls_loss = cls_loss + (per_cell * sample_w).mean()
 
                 # --- geometry losses ---
                 d_raw = dec["d_raw"][b, pos_idx]

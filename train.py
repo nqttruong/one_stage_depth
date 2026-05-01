@@ -51,6 +51,8 @@ def parse_args():
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--weight-decay", type=float, default=5e-4)
     ap.add_argument("--num-classes", type=int, default=3)
+    ap.add_argument("--backbone-size", default="n", choices=["n", "m"],
+                    help="YOLOv8 backbone scale: n (default) or m.")
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--save-dir", default="runs/ogcde")
@@ -75,6 +77,8 @@ def parse_args():
                          "reduce contact-point dominance in total loss.")
     ap.add_argument("--focal-gamma", type=float, default=1.5,
                     help="Focal loss gamma for obj/cls BCE (0 = plain BCE).")
+    ap.add_argument("--cls-weights", type=float, nargs="+", default=None,
+                    help="Per-class loss weights e.g. '1.0 3.0 5.0' for Car/Ped/Cyclist.")
     # resume
     ap.add_argument("--resume", default=None,
                     help="Path to checkpoint to resume from (.pt).")
@@ -123,13 +127,14 @@ def main():
     Path(args.save_dir).mkdir(parents=True, exist_ok=True)
 
     device = torch.device(args.device)
-    model = OGCDENet(nc=args.num_classes).to(device)
+    model = OGCDENet(nc=args.num_classes, backbone_size=args.backbone_size).to(device)
     criterion = OGCDELoss(
         nc=args.num_classes,
         lambdas=(1.0, 0.5, args.w_cp, 2.0),
         det_weights=(args.w_box, args.w_obj, args.w_cls),
         has_depth_gt=not args.no_depth_gt,
         focal_gamma=args.focal_gamma,
+        cls_weights=args.cls_weights,
     ).to(device)
 
     # Load pretrained backbone before optimizer init (so frozen params are excluded)

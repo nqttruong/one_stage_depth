@@ -76,15 +76,26 @@ class SPPF(nn.Module):
 
 
 class Backbone(nn.Module):
-    """YOLOv8n-scale backbone. Outputs feature maps at strides 8, 16, 32."""
+    """YOLOv8-scale backbone. Outputs feature maps at strides 8, 16, 32.
 
-    def __init__(self, w=(16, 32, 64, 128, 256)):
+    Predefined configs (width, depth):
+        'n': w=(16,32,64,128,256),   d=(1,2,2,1)  — YOLOv8n
+        'm': w=(48,96,192,384,576),  d=(2,4,4,2)  — YOLOv8m
+    """
+
+    CONFIGS = {
+        "n": {"w": (16,  32,  64,  128, 256), "d": (1, 2, 2, 1)},
+        "m": {"w": (48,  96, 192,  384, 576), "d": (2, 4, 4, 2)},
+    }
+
+    def __init__(self, w=(16, 32, 64, 128, 256), d=(1, 2, 2, 1)):
         super().__init__()
-        self.stem = Conv(3, w[0], 3, 2)                          # P1/2
-        self.dark2 = nn.Sequential(Conv(w[0], w[1], 3, 2), C2f(w[1], w[1], 1, True))   # P2/4
-        self.dark3 = nn.Sequential(Conv(w[1], w[2], 3, 2), C2f(w[2], w[2], 2, True))   # P3/8
-        self.dark4 = nn.Sequential(Conv(w[2], w[3], 3, 2), C2f(w[3], w[3], 2, True))   # P4/16
-        self.dark5 = nn.Sequential(Conv(w[3], w[4], 3, 2), C2f(w[4], w[4], 1, True), SPPF(w[4], w[4]))  # P5/32
+        d2, d3, d4, d5 = d
+        self.stem = Conv(3, w[0], 3, 2)                                                        # P1/2
+        self.dark2 = nn.Sequential(Conv(w[0], w[1], 3, 2), C2f(w[1], w[1], d2, True))        # P2/4
+        self.dark3 = nn.Sequential(Conv(w[1], w[2], 3, 2), C2f(w[2], w[2], d3, True))        # P3/8
+        self.dark4 = nn.Sequential(Conv(w[2], w[3], 3, 2), C2f(w[3], w[3], d4, True))        # P4/16
+        self.dark5 = nn.Sequential(Conv(w[3], w[4], 3, 2), C2f(w[4], w[4], d5, True), SPPF(w[4], w[4]))  # P5/32
         self.out_ch = (w[2], w[3], w[4])
 
     def forward(self, x):
@@ -161,15 +172,17 @@ class OGCDENet(nn.Module):
 
     Args:
         nc: number of classes.
-        width: tuple of backbone channel widths. Default is YOLOv8n-scale.
+        backbone_size: 'n' (YOLOv8n) or 'm' (YOLOv8m).
     """
 
     STRIDES = (8, 16, 32)
 
-    def __init__(self, nc=3, width=(16, 32, 64, 128, 256)):
+    def __init__(self, nc=3, backbone_size="n"):
         super().__init__()
         self.nc = nc
-        self.backbone = Backbone(width)
+        self.backbone_size = backbone_size
+        cfg = Backbone.CONFIGS[backbone_size]
+        self.backbone = Backbone(cfg["w"], cfg["d"])
         self.neck = Neck(self.backbone.out_ch)
         self.head = OGCDEHead(nc=nc, ch=self.neck.out_ch)
 
@@ -178,14 +191,13 @@ class OGCDENet(nn.Module):
         f3, f4, f5 = self.neck(p3, p4, p5)
         return self.head([f3, f4, f5])
 
-    def load_pretrained_backbone(self, yolov8n_path: str) -> None:
-        """Transplant YOLOv8n COCO backbone weights into self.backbone.
+    def load_pretrained_backbone(self, yolo_path: str) -> None:
+        """Transplant YOLOv8n/m COCO backbone weights into self.backbone.
 
-        Layer shapes are identical (both YOLOv8n-scale, width=(16,32,64,128,256)).
         ultralytics is only needed here — not at inference time.
         """
         from ultralytics import YOLO
-        src = YOLO(yolov8n_path).model.state_dict()
+        src = YOLO(yolo_path).model.state_dict()
         prefix_map = {
             "stem":    "model.0",
             "dark2.0": "model.1", "dark2.1": "model.2",
@@ -199,7 +211,7 @@ class OGCDENet(nn.Module):
                 if k.startswith(yolo_pfx + "."):
                     mapped[ogcde_pfx + k[len(yolo_pfx):]] = v
         self.backbone.load_state_dict(mapped, strict=True)
-        print(f"[pretrained] loaded {len(mapped)} backbone tensors from {yolov8n_path}")
+        print(f"[pretrained] loaded {len(mapped)} backbone tensors from {yolo_path}")
 
 
 # ----------------------------- decoding helpers ------------------------------

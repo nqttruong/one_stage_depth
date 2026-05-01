@@ -38,8 +38,10 @@ def parse_args():
     ap.add_argument("--camera", type=int, nargs="?", const=0, default=None,
                     help="camera index for live inference (default 0)")
     ap.add_argument("--img-size", type=int, default=640)
-    ap.add_argument("--obj-thr", type=float, default=0.5)
+    ap.add_argument("--obj-thr", type=float, default=0.65)
     ap.add_argument("--iou-thr", type=float, default=0.5)
+    ap.add_argument("--min-box", type=int, default=30,
+                    help="Min width AND height (px) to keep a detection (default 30)")
     ap.add_argument("--num-classes", type=int, default=3)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--save-video", action="store_true")
@@ -56,16 +58,18 @@ def preprocess(frame, size):
     return t, ratio, pad
 
 
-def draw(frame, dets):
+def draw(frame, dets, min_box=0):
     for b, s, c, d, dist, cp in zip(
         dets["boxes"], dets["scores"], dets["classes"],
         dets["depth"], dets["distance"], dets["contact"],
     ):
         x, y, w, h = b
+        if w < min_box or h < min_box:
+            continue
         x1, y1, x2, y2 = int(x - w/2), int(y - h/2), int(x + w/2), int(y + h/2)
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cv2.circle(frame, (int(cp[0]), int(cp[1])), 4, (0, 0, 255), -1)
-        label = f"{CLASSES[int(c)]} {dist:.1f}m  d={float(d):.2f}"
+        label = f"{CLASSES[int(c)]} {s:.2f} {dist:.1f}m"
         cv2.putText(frame, label, (x1, max(0, y1 - 6)),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
     return frame
@@ -179,7 +183,7 @@ def run_video(args, model, device):
                 ids = tracker.update(boxes)
                 for tid, dist in zip(ids, dets_orig["distance"]):
                     track_dists[tid].append(float(dist))
-                frame = draw(frame, dets_orig)
+                frame = draw(frame, dets_orig, min_box=args.min_box)
 
             now = time.time()
             fps = 1.0 / max(now - prev_t, 1e-6)
@@ -258,7 +262,7 @@ def run_camera(args, model, device):
             ids = tracker.update(boxes)
             for tid, dist in zip(ids, dets_orig["distance"]):
                 track_dists[tid].append(float(dist))
-            frame = draw(frame, dets_orig)
+            frame = draw(frame, dets_orig, min_box=args.min_box)
 
         now = time.time()
         fps = 1.0 / max(now - prev_t, 1e-6)
@@ -297,8 +301,9 @@ def main():
         raise ValueError("Cần chỉ định --source (video/folder) hoặc --camera [index]")
 
     device = torch.device(args.device)
-    model = OGCDENet(nc=args.num_classes).to(device)
     ckpt = torch.load(args.ckpt, map_location=device, weights_only=False)
+    backbone_size = ckpt.get("args", {}).get("backbone_size", "n")
+    model = OGCDENet(nc=args.num_classes, backbone_size=backbone_size).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
     print(f"Loaded {args.ckpt}  (epoch {ckpt.get('epoch','?')})")
@@ -342,9 +347,10 @@ def main():
             ids = tracker.update(boxes)
             for tid, dist in zip(ids, dets_orig["distance"]):
                 track_dists[tid].append(float(dist))
-            frame = draw(frame, dets_orig)
-            out_path = os.path.join(args.out, os.path.basename(name))
-            cv2.imwrite(out_path, frame)
+            frame = draw(frame, dets_orig, min_box=args.min_box)
+
+        out_path = os.path.join(args.out, os.path.basename(name))
+        cv2.imwrite(out_path, frame)
 
     stab = stability(track_dists)
     print(f"Stability (mean per-track variance of distance): {stab:.4f}")

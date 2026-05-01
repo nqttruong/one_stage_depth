@@ -48,8 +48,9 @@ def main():
     device = torch.device(args.device)
 
     # -------- model ---------
-    model = OGCDENet(nc=args.num_classes).to(device)
     ckpt = torch.load(args.ckpt, map_location=device)
+    backbone_size = ckpt.get("args", {}).get("backbone_size", "n")
+    model = OGCDENet(nc=args.num_classes, backbone_size=backbone_size).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
 
