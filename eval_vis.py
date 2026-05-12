@@ -282,6 +282,7 @@ def run_kitti(args, model, device):
             "depth":   targets["depth"].numpy()[bmask],
             "contact": unletterbox_points(
                             targets["contact"].numpy()[bmask], m["ratio"], m["pad"]),
+            "loc3d":   targets["loc3d"].numpy()[bmask],
         }
 
         # Vẽ GT trước (dưới), pred sau (trên)
@@ -307,7 +308,8 @@ def run_kitti(args, model, device):
             "distance": dets["distance"],
             "contact":  dets["contact"],
         }
-        evaluator.update(pred_eval, gt)
+        intrinsics = {"fx": m["fx"], "fy": m["fy"], "cx": m["cx"], "cy": m["cy"]}
+        evaluator.update(pred_eval, gt, intrinsics=intrinsics)
 
     # ── In metrics tổng hợp ──
     print(f"\n[done] {total} ảnh visualized → {out_dir}/")
@@ -330,6 +332,7 @@ def run_kitti(args, model, device):
     print(f"    δ₁<1.25  = {dz['delta1']*100:.2f}%")
     print(f"\n  DE  (mean dist error)      = {result['DE']:.4f} m")
     print(f"  CPE (contact point error)  = {result['CPE_px']:.4f} px")
+    print(f"  ALE (3D loc error)         = {result['ALE']:.4f} m")
     print("=" * 58)
 
     return result
@@ -378,8 +381,9 @@ def main():
         )
 
     device = torch.device(args.device)
-    model  = OGCDENet(nc=args.num_classes).to(device)
     ckpt   = torch.load(args.ckpt, map_location=device, weights_only=False)
+    backbone_size = ckpt.get("args", {}).get("backbone_size", "n")
+    model  = OGCDENet(nc=args.num_classes, backbone_size=backbone_size).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
     print(f"Loaded {args.ckpt}  (epoch {ckpt.get('epoch', '?')},"

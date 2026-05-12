@@ -25,11 +25,13 @@ def depth_metrics(pred: np.ndarray, gt: np.ndarray) -> Dict[str, float]:
     pred = pred[valid]
     gt = gt[valid]
     if pred.size == 0:
-        return {"AbsRel": float("nan"), "RMSE": float("nan"), "RMSE_log": float("nan"),
+        return {"AbsRel": float("nan"), "SqRel": float("nan"),
+                "RMSE": float("nan"), "RMSE_log": float("nan"),
                 "delta1": float("nan"), "delta2": float("nan"), "delta3": float("nan"),
                 "n": 0}
 
     abs_rel = np.mean(np.abs(pred - gt) / gt)
+    sq_rel  = np.mean(((pred - gt) ** 2) / gt)
     rmse = np.sqrt(np.mean((pred - gt) ** 2))
     rmse_log = np.sqrt(np.mean((np.log(pred) - np.log(gt)) ** 2))
     ratio = np.maximum(pred / gt, gt / pred)
@@ -38,6 +40,7 @@ def depth_metrics(pred: np.ndarray, gt: np.ndarray) -> Dict[str, float]:
     d3 = float(np.mean(ratio < 1.25 ** 3))
     return {
         "AbsRel": float(abs_rel),
+        "SqRel":  float(sq_rel),
         "RMSE": float(rmse),
         "RMSE_log": float(rmse_log),
         "delta1": d1, "delta2": d2, "delta3": d3,
@@ -167,103 +170,119 @@ def compute_ap(recalls: np.ndarray, precisions: np.ndarray) -> float:
 class MAPEvaluator:
     """PASCAL VOC-style mAP@IoU evaluator.
 
-    Collects all predictions and GT boxes across the dataset, then computes
-    per-class AP and mean AP.
+    Also computes AP3D: TP requires IoU >= iou_thr AND
+    max(dist_pred/dist_gt, dist_gt/dist_pred) < dist_ratio_thr (default 1.25).
 
     Usage::
         ev = MAPEvaluator(num_classes=3, iou_thr=0.5)
         for pred, gt in ...:
             ev.update(pred, gt, img_id)
-        result = ev.compute()   # {"mAP": ..., "AP": [ap0, ap1, ap2]}
+        result = ev.compute()   # {"mAP": ..., "AP_per_class": [...],
+                                #  "mAP3D": ..., "AP3D_per_class": [...]}
     """
 
-    def __init__(self, num_classes: int = 3, iou_thr: float = 0.5):
+    def __init__(self, num_classes: int = 3, iou_thr: float = 0.5,
+                 dist_ratio_thr: float = 1.25):
         self.num_classes = num_classes
         self.iou_thr = iou_thr
+        self.dist_ratio_thr = dist_ratio_thr
         self.reset()
 
     def reset(self):
-        # per-class lists of (score, img_id, pred_box_xyxy)
+        # per-class lists of (score, img_id, pred_box_xyxy, pred_dist)
         self._preds: list[list] = [[] for _ in range(self.num_classes)]
-        # per (img_id, class): list of gt_box_xyxy (as list for hashing)
-        self._gts: dict = {}
+        self._gts: dict = {}       # (img_id, c) -> gt_boxes_xyxy (n,4)
+        self._gt_dist: dict = {}   # (img_id, c) -> gt_distances  (n,)
         self._n_gt = np.zeros(self.num_classes, dtype=np.int64)
 
     def update(self, pred: dict, gt: dict, img_id):
         """
-        pred: boxes (xywh), scores, classes  (numpy)
-        gt:   boxes (xywh), labels           (numpy)
+        pred: boxes (xywh), scores, classes, distance  (numpy)
+        gt:   boxes (xywh), labels, dist               (numpy)
         img_id: any hashable identifier for this image.
         """
-        g_xyxy = xywh_to_xyxy(np.asarray(gt["boxes"]))
+        g_xyxy   = xywh_to_xyxy(np.asarray(gt["boxes"]))
         g_labels = np.asarray(gt["labels"])
+        g_dist   = np.asarray(gt.get("dist", np.zeros(len(g_labels))), dtype=np.float64)
 
         for c in range(self.num_classes):
             gt_mask = g_labels == c
-            boxes_c = g_xyxy[gt_mask]
             key = (img_id, c)
-            self._gts[key] = boxes_c  # (n_gt_c, 4)
+            self._gts[key]     = g_xyxy[gt_mask]
+            self._gt_dist[key] = g_dist[gt_mask]
             self._n_gt[c] += int(gt_mask.sum())
 
         p_boxes  = xywh_to_xyxy(np.asarray(pred["boxes"]))
         p_scores = np.asarray(pred["scores"])
         p_cls    = np.asarray(pred["classes"])
+        p_dist   = np.asarray(pred.get("distance", np.zeros(len(p_scores))), dtype=np.float64)
 
         for i in range(len(p_boxes)):
             c = int(p_cls[i])
             if 0 <= c < self.num_classes:
-                self._preds[c].append((float(p_scores[i]), img_id, p_boxes[i]))
+                self._preds[c].append((float(p_scores[i]), img_id, p_boxes[i], float(p_dist[i])))
+
+    def _compute_ap_for_class(self, c: int, use_dist: bool) -> float:
+        preds_c = self._preds[c]
+        if self._n_gt[c] == 0:
+            return float("nan")
+        if len(preds_c) == 0:
+            return 0.0
+
+        preds_c = sorted(preds_c, key=lambda x: -x[0])
+        matched: dict = {}
+        tp = np.zeros(len(preds_c))
+        fp = np.zeros(len(preds_c))
+
+        for i, (score, img_id, pbox, p_dist_val) in enumerate(preds_c):
+            key = (img_id, c)
+            gt_boxes = self._gts.get(key, np.zeros((0, 4)))
+            if len(gt_boxes) == 0:
+                fp[i] = 1
+                continue
+
+            if key not in matched:
+                matched[key] = np.zeros(len(gt_boxes), dtype=bool)
+
+            ious = bbox_iou_xyxy(pbox[None], gt_boxes)[0]
+            ious[matched[key]] = -1
+
+            if use_dist:
+                gt_dists = self._gt_dist.get(key, np.zeros(len(gt_boxes)))
+                valid = gt_dists > 0
+                ratio = np.where(
+                    valid,
+                    np.maximum(p_dist_val / np.where(gt_dists > 0, gt_dists, 1.0),
+                               gt_dists / max(p_dist_val, 1e-6)),
+                    np.inf,
+                )
+                ious[ratio >= self.dist_ratio_thr] = -1
+
+            best = int(np.argmax(ious))
+            if ious[best] >= self.iou_thr:
+                tp[i] = 1
+                matched[key][best] = True
+            else:
+                fp[i] = 1
+
+        cum_tp = np.cumsum(tp)
+        cum_fp = np.cumsum(fp)
+        recalls    = cum_tp / (self._n_gt[c] + 1e-9)
+        precisions = cum_tp / (cum_tp + cum_fp + 1e-9)
+        return compute_ap(recalls, precisions)
 
     def compute(self) -> dict:
-        aps = []
-        for c in range(self.num_classes):
-            preds_c = self._preds[c]
-            if self._n_gt[c] == 0:
-                aps.append(float("nan"))
-                continue
-            if len(preds_c) == 0:
-                aps.append(0.0)
-                continue
+        aps    = [self._compute_ap_for_class(c, use_dist=False) for c in range(self.num_classes)]
+        aps_3d = [self._compute_ap_for_class(c, use_dist=True)  for c in range(self.num_classes)]
 
-            # sort descending by score
-            preds_c.sort(key=lambda x: -x[0])
-
-            # track which GT boxes have been matched per image
-            matched: dict = {}  # (img_id, c) -> bool array
-
-            tp = np.zeros(len(preds_c))
-            fp = np.zeros(len(preds_c))
-
-            for i, (score, img_id, pbox) in enumerate(preds_c):
-                key = (img_id, c)
-                gt_boxes = self._gts.get(key, np.zeros((0, 4)))
-
-                if len(gt_boxes) == 0:
-                    fp[i] = 1
-                    continue
-
-                if key not in matched:
-                    matched[key] = np.zeros(len(gt_boxes), dtype=bool)
-
-                ious = bbox_iou_xyxy(pbox[None], gt_boxes)[0]  # (n_gt,)
-                ious[matched[key]] = -1  # mask already-matched GT
-                best = int(np.argmax(ious))
-
-                if ious[best] >= self.iou_thr:
-                    tp[i] = 1
-                    matched[key][best] = True
-                else:
-                    fp[i] = 1
-
-            cum_tp = np.cumsum(tp)
-            cum_fp = np.cumsum(fp)
-            recalls    = cum_tp / (self._n_gt[c] + 1e-9)
-            precisions = cum_tp / (cum_tp + cum_fp + 1e-9)
-            aps.append(compute_ap(recalls, precisions))
-
-        valid_aps = [a for a in aps if not np.isnan(a)]
-        mAP = float(np.mean(valid_aps)) if valid_aps else float("nan")
-        return {"mAP": mAP, "AP_per_class": aps}
+        valid    = [a for a in aps    if not np.isnan(a)]
+        valid_3d = [a for a in aps_3d if not np.isnan(a)]
+        return {
+            "mAP":           float(np.mean(valid))    if valid    else float("nan"),
+            "AP_per_class":  aps,
+            "mAP3D":         float(np.mean(valid_3d)) if valid_3d else float("nan"),
+            "AP3D_per_class": aps_3d,
+        }
 
 
 # ---------------------------- aggregate over dataset -----------------------
@@ -283,13 +302,18 @@ class OGCDEEvaluator:
         self.depth_gt = []
         self.cp_pred = []
         self.cp_gt = []
+        self.cls = []          # GT class label for each matched pair
+        self.ale_errors = []
+        self.ale_cls = []      # GT class label for each ALE entry
 
     # -------- one-image update ------------------------------------------
-    def update(self, pred, gt):
+    def update(self, pred, gt, intrinsics=None):
         """
         pred: dict with numpy arrays: boxes (xywh), scores, classes,
               depth, distance, contact.
         gt:   dict with boxes (xywh), labels, dist, depth, contact.
+              Optionally: loc3d (N,3) — 3D bottom-center in camera coords.
+        intrinsics: dict with fx, fy, cx, cy (from P2). Required for ALE.
         """
         p_xyxy = xywh_to_xyxy(pred["boxes"])
         g_xyxy = xywh_to_xyxy(gt["boxes"])
@@ -301,6 +325,8 @@ class OGCDEEvaluator:
         )
         if len(mp) == 0:
             return
+        gt_labels = np.asarray(gt["labels"])
+        self.cls.extend(gt_labels[mg].tolist())
         self.dist_pred.extend(np.asarray(pred["distance"])[mp].tolist())
         self.dist_gt.extend(np.asarray(gt["dist"])[mg].tolist())
         self.depth_pred.extend(np.asarray(pred["depth"])[mp].tolist())
@@ -308,16 +334,58 @@ class OGCDEEvaluator:
         self.cp_pred.extend(np.asarray(pred["contact"])[mp].tolist())
         self.cp_gt.extend(np.asarray(gt["contact"])[mg].tolist())
 
+        if intrinsics is not None and "loc3d" in gt:
+            fx, fy = intrinsics["fx"], intrinsics["fy"]
+            cx, cy = intrinsics["cx"], intrinsics["cy"]
+            cp_p   = np.asarray(pred["contact"])[mp]    # (K,2)
+            dep_p  = np.asarray(pred["depth"])[mp]      # (K,)
+            loc_g  = np.asarray(gt["loc3d"])[mg]        # (K,3)
+            X_p = (cp_p[:, 0] - cx) * dep_p / fx
+            Y_p = (cp_p[:, 1] - cy) * dep_p / fy
+            err3d = np.sqrt((X_p - loc_g[:, 0])**2 +
+                            (Y_p - loc_g[:, 1])**2 +
+                            (dep_p - loc_g[:, 2])**2)
+            self.ale_errors.extend(err3d.tolist())
+            self.ale_cls.extend(gt_labels[mg].tolist())
+
     # -------- summary ---------------------------------------------------
-    def compute(self):
-        depth_m = depth_metrics(np.array(self.depth_pred), np.array(self.depth_gt))
-        dist_m = depth_metrics(np.array(self.dist_pred), np.array(self.dist_gt))
-        de = distance_error(np.array(self.dist_pred), np.array(self.dist_gt))
+    def compute(self, num_classes: int = 3):
+        dist_pred  = np.array(self.dist_pred)
+        dist_gt    = np.array(self.dist_gt)
+        depth_pred = np.array(self.depth_pred)
+        depth_gt   = np.array(self.depth_gt)
+        cls_arr    = np.array(self.cls, dtype=np.int64)
+        ale_arr    = np.array(self.ale_errors) if self.ale_errors else None
+        ale_cls    = np.array(self.ale_cls, dtype=np.int64) if self.ale_cls else None
+
+        depth_m = depth_metrics(depth_pred, depth_gt)
+        dist_m  = depth_metrics(dist_pred,  dist_gt)
+        de  = distance_error(dist_pred, dist_gt)
         cpe = contact_point_error(np.array(self.cp_pred), np.array(self.cp_gt))
+        ale = float(np.mean(ale_arr)) if ale_arr is not None and len(ale_arr) else float("nan")
+
+        per_class = []
+        for c in range(num_classes):
+            mask = cls_arr == c
+            if ale_arr is not None and ale_cls is not None:
+                amask = ale_cls == c
+                ale_c = float(np.mean(ale_arr[amask])) if amask.sum() > 0 else float("nan")
+            else:
+                ale_c = float("nan")
+            per_class.append({
+                "distance": depth_metrics(dist_pred[mask],  dist_gt[mask]),
+                "depth":    depth_metrics(depth_pred[mask], depth_gt[mask]),
+                "DE":  distance_error(dist_pred[mask], dist_gt[mask]),
+                "ALE": ale_c,
+                "n":   int(mask.sum()),
+            })
+
         return {
-            "depth": depth_m,        # AbsRel/RMSE/delta on d_pred vs d_gt
-            "distance": dist_m,      # same metrics on distance
-            "DE": de,
-            "CPE_px": cpe,
+            "depth":     depth_m,
+            "distance":  dist_m,
+            "DE":        de,
+            "CPE_px":    cpe,
+            "ALE":       ale,
             "n_matched": len(self.dist_pred),
+            "per_class": per_class,
         }

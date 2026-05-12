@@ -109,10 +109,10 @@ class KITTIOGCDEDataset(Dataset):
         "Cyclist":        2,
     }
 
-    def __init__(self, root, split_file, img_size=640, augment=False,
+    def __init__(self, root, split_file, img_size=640, augment=False, strong_aug=False,
                  distance_mode="euclidean", depth_mode="bottom_z",
                  filter_difficult=True, hflip=False,
-                 depth_source=None):
+                 depth_source=None, dist_source=None):
         """
         Args:
             root, split_file, img_size: standard.
@@ -122,10 +122,11 @@ class KITTIOGCDEDataset(Dataset):
                 depth_source is None (default fast pipeline).
             hflip: if True AND augment, randomly horizontal-flip with prob 0.5.
                 Geometry-safe under our setup (see module docstring).
-            depth_source: optional path to a JSON or npy mapping
-                {image_id: list of per-object depths}. Use this for
-                "stage 2" training with median-LiDAR-Z per object.
-                If None, falls back to depth_mode.
+            depth_source: optional path to a JSON mapping
+                {image_id: [d1, d2, ...]} to override depth (Z) GT per object.
+            dist_source: optional path to a JSON produced by prepare_lidar_gt.py
+                to override distance GT with LiDAR-based values per object.
+                Format: {image_id: [{obj_idx, dist_lidar, ...}, ...]}
         """
         self.root = root
         self.image_dir = os.path.join(root, "image_2")
@@ -135,6 +136,7 @@ class KITTIOGCDEDataset(Dataset):
             self.ids = [line.strip() for line in f if line.strip()]
         self.img_size = img_size
         self.augment = augment
+        self.strong_aug = strong_aug
         self.distance_mode = distance_mode
         self.depth_mode = depth_mode
         self.filter_difficult = filter_difficult
@@ -143,6 +145,12 @@ class KITTIOGCDEDataset(Dataset):
         self._depth_lookup = None
         if depth_source is not None:
             self._depth_lookup = self._load_depth_source(depth_source)
+
+        self._dist_lookup = None
+        if dist_source is not None:
+            import json
+            with open(dist_source) as f:
+                self._dist_lookup = json.load(f)
 
     def __len__(self):
         return len(self.ids)
@@ -164,6 +172,54 @@ class KITTIOGCDEDataset(Dataset):
         elif path.endswith(".npy"):
             return np.load(path, allow_pickle=True).item()
         raise ValueError(f"Unsupported depth_source extension: {path}")
+
+    @staticmethod
+    def _random_crop(img, boxes, contacts, scale_range=(0.6, 1.0), max_tries=10):
+        """Random crop preserving at least one box. Returns also a keep mask
+        so the caller can sub-select labels / dists / depths consistently.
+        Distance / depth / scale are intrinsic to the object and unchanged.
+        """
+        H, W = img.shape[:2]
+        if len(boxes) == 0:
+            return img, boxes, contacts, np.ones(0, dtype=bool)
+        for _ in range(max_tries):
+            s = np.random.uniform(*scale_range)
+            ch, cw = int(H * s), int(W * s)
+            y0 = np.random.randint(0, H - ch + 1)
+            x0 = np.random.randint(0, W - cw + 1)
+            cx, cy = boxes[:, 0], boxes[:, 1]
+            keep = (cx >= x0) & (cx < x0 + cw) & (cy >= y0) & (cy < y0 + ch)
+            if not keep.any():
+                continue
+            boxes_new = boxes[keep].copy()
+            contacts_new = contacts[keep].copy()
+            boxes_new[:, 0] -= x0
+            boxes_new[:, 1] -= y0
+            contacts_new[:, 0] -= x0
+            contacts_new[:, 1] -= y0
+            x1 = boxes_new[:, 0] - boxes_new[:, 2] / 2
+            y1 = boxes_new[:, 1] - boxes_new[:, 3] / 2
+            x2 = boxes_new[:, 0] + boxes_new[:, 2] / 2
+            y2 = boxes_new[:, 1] + boxes_new[:, 3] / 2
+            x1 = np.clip(x1, 0, cw); x2 = np.clip(x2, 0, cw)
+            y1 = np.clip(y1, 0, ch); y2 = np.clip(y2, 0, ch)
+            boxes_new[:, 0] = (x1 + x2) / 2
+            boxes_new[:, 1] = (y1 + y2) / 2
+            boxes_new[:, 2] = x2 - x1
+            boxes_new[:, 3] = y2 - y1
+            ok = (boxes_new[:, 2] >= 4) & (boxes_new[:, 3] >= 4)
+            if not ok.any():
+                continue
+            keep_idx = np.where(keep)[0][ok]
+            full_mask = np.zeros(len(boxes), dtype=bool)
+            full_mask[keep_idx] = True
+            return (
+                img[y0:y0 + ch, x0:x0 + cw].copy(),
+                boxes_new[ok],
+                contacts_new[ok],
+                full_mask,
+            )
+        return img, boxes, contacts, np.ones(len(boxes), dtype=bool)
 
     @staticmethod
     def _color_jitter(img, b=0.2, c=0.2, s=0.2):
@@ -191,8 +247,8 @@ class KITTIOGCDEDataset(Dataset):
 
     # --------------------------------------------------------------------
     def _build_targets(self, objects, P2, image_id):
-        boxes, labels, dists, depths, contacts = [], [], [], [], []
-        for obj in objects:
+        boxes, labels, dists, depths, contacts, locs3d, obj_idxs = [], [], [], [], [], [], []
+        for raw_idx, obj in enumerate(objects):
             if obj["type"] not in self.CLASS_MAP:
                 continue
             if self.filter_difficult and (obj["truncated"] > 0.5 or obj["occluded"] > 2):
@@ -208,8 +264,11 @@ class KITTIOGCDEDataset(Dataset):
             cy = (t + b) / 2.0
             boxes.append([cx, cy, w, h_])
             labels.append(self.CLASS_MAP[obj["type"]])
+            obj_idxs.append(raw_idx)
 
             x, y, z = obj["loc"]          # bottom center in cam coord
+            locs3d.append([float(x), float(y), float(z)])
+
             if self.depth_mode == "bottom_z":
                 d = z
             else:  # center_z
@@ -232,12 +291,22 @@ class KITTIOGCDEDataset(Dataset):
             if len(override) == len(depths):
                 depths = list(override)
 
+        # dist_source override (LiDAR-based Euclidean distance from prepare_lidar_gt.py)
+        if self._dist_lookup is not None and image_id in self._dist_lookup:
+            records = self._dist_lookup[image_id]
+            rec_by_idx = {r["obj_idx"]: r["dist_lidar"] for r in records}
+            for k, raw_idx in enumerate(obj_idxs):
+                if raw_idx in rec_by_idx:
+                    dists[k] = rec_by_idx[raw_idx]
+
         return (
             np.asarray(boxes, dtype=np.float32).reshape(-1, 4),
             np.asarray(labels, dtype=np.int64),
             np.asarray(dists, dtype=np.float32),
             np.asarray(depths, dtype=np.float32),
             np.asarray(contacts, dtype=np.float32).reshape(-1, 2),
+            np.asarray(locs3d, dtype=np.float32).reshape(-1, 3),
+            np.asarray(obj_idxs, dtype=np.int64),
         )
 
     # --------------------------------------------------------------------
@@ -256,11 +325,23 @@ class KITTIOGCDEDataset(Dataset):
         P2 = calib["P2"]
 
         objects = parse_kitti_label(label_path)
-        boxes, labels, dists, depths, contacts = self._build_targets(objects, P2, fid)
+        boxes, labels, dists, depths, contacts, loc3d, obj_idxs = self._build_targets(objects, P2, fid)
 
         # photometric aug (default ON when augment=True; P2-safe).
         if self.augment:
-            img = self._color_jitter(img)
+            if self.strong_aug:
+                img = self._color_jitter(img, b=0.4, c=0.4, s=0.4)
+            else:
+                img = self._color_jitter(img)
+
+        # random crop (geometry-safe: distance/depth/scale unchanged)
+        if self.augment and self.strong_aug and np.random.rand() < 0.5:
+            img, boxes, contacts, mask = self._random_crop(img, boxes, contacts)
+            labels = labels[mask]
+            dists = dists[mask]
+            depths = depths[mask]
+            loc3d = loc3d[mask]
+            obj_idxs = obj_idxs[mask]
 
         # letterbox
         img_lb, ratio, (px, py) = letterbox(img, self.img_size)
@@ -281,19 +362,26 @@ class KITTIOGCDEDataset(Dataset):
             if len(boxes) > 0:
                 boxes[:, 0] = W - boxes[:, 0]
                 contacts[:, 0] = W - contacts[:, 0]
+                loc3d[:, 0] = -loc3d[:, 0]
 
         img_t = torch.from_numpy(img_lb.transpose(2, 0, 1)).contiguous().float() / 255.0
 
         return img_t, {
-            "boxes":   torch.from_numpy(boxes),
-            "labels":  torch.from_numpy(labels),
-            "dist":    torch.from_numpy(dists),
-            "depth":   torch.from_numpy(depths),
-            "contact": torch.from_numpy(contacts),
+            "boxes":    torch.from_numpy(boxes),
+            "labels":   torch.from_numpy(labels),
+            "dist":     torch.from_numpy(dists),
+            "depth":    torch.from_numpy(depths),
+            "contact":  torch.from_numpy(contacts),
+            "loc3d":    torch.from_numpy(loc3d),
+            "obj_idx":  torch.from_numpy(obj_idxs),
             "image_id": fid,
             "orig_shape": img.shape[:2],   # (H, W) before letterbox
             "ratio": ratio,
             "pad": (px, py),
+            "fx": float(P2[0, 0]),
+            "fy": float(P2[1, 1]),
+            "cx": float(P2[0, 2]),
+            "cy": float(P2[1, 2]),
         }
 
 
@@ -304,7 +392,7 @@ def collate_ogcde(batch):
     imgs = torch.stack([b[0] for b in batch], 0)
     meta = [b[1] for b in batch]
 
-    boxes_l, labels_l, dist_l, depth_l, contact_l, batch_l = [], [], [], [], [], []
+    boxes_l, labels_l, dist_l, depth_l, contact_l, loc3d_l, obj_idx_l, batch_l = [], [], [], [], [], [], [], []
     for i, t in enumerate(meta):
         n = len(t["boxes"])
         if n == 0:
@@ -314,15 +402,19 @@ def collate_ogcde(batch):
         dist_l.append(t["dist"])
         depth_l.append(t["depth"])
         contact_l.append(t["contact"])
+        loc3d_l.append(t["loc3d"])
+        obj_idx_l.append(t["obj_idx"])
         batch_l.append(torch.full((n,), i, dtype=torch.long))
 
     if not boxes_l:
         targets = {
-            "boxes": torch.zeros(0, 4),
-            "labels": torch.zeros(0, dtype=torch.long),
-            "dist": torch.zeros(0),
-            "depth": torch.zeros(0),
-            "contact": torch.zeros(0, 2),
+            "boxes":     torch.zeros(0, 4),
+            "labels":    torch.zeros(0, dtype=torch.long),
+            "dist":      torch.zeros(0),
+            "depth":     torch.zeros(0),
+            "contact":   torch.zeros(0, 2),
+            "loc3d":     torch.zeros(0, 3),
+            "obj_idx":   torch.zeros(0, dtype=torch.long),
             "batch_idx": torch.zeros(0, dtype=torch.long),
         }
     else:
@@ -332,6 +424,8 @@ def collate_ogcde(batch):
             "dist":      torch.cat(dist_l, 0),
             "depth":     torch.cat(depth_l, 0),
             "contact":   torch.cat(contact_l, 0),
+            "loc3d":     torch.cat(loc3d_l, 0),
+            "obj_idx":   torch.cat(obj_idx_l, 0),
             "batch_idx": torch.cat(batch_l, 0),
         }
 

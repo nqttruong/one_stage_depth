@@ -90,6 +90,7 @@ def run_one_model(ckpt_path, ds, loader, args, device):
                 gt_dist    = gt_dist_all[bmask]
                 gt_depth   = gt_depth_all[bmask]
                 gt_contact = unletterbox_points(gt_contact_all[bmask], m["ratio"], m["pad"])
+                gt_loc3d   = targets["loc3d"].numpy()[bmask]
 
                 pred_boxes   = unletterbox_boxes(det["boxes"].cpu().numpy(), m["ratio"], m["pad"])
                 pred_contact = unletterbox_points(det["contact"].cpu().numpy(), m["ratio"], m["pad"])
@@ -106,6 +107,8 @@ def run_one_model(ckpt_path, ds, loader, args, device):
                     xywh_to_xyxy(gt_boxes), iou_thr=args.iou_thr,
                     pred_cls=pred_classes, gt_cls=gt_labels,
                 )
+                fx, fy = m["fx"], m["fy"]
+                cx, cy = m["cx"], m["cy"]
                 for pi, gi in zip(mp, mg):
                     key = (img_id, int(local_gt_indices[gi]))
                     records[key] = {
@@ -115,16 +118,19 @@ def run_one_model(ckpt_path, ds, loader, args, device):
                         "depth_gt":   float(gt_depth[gi]),
                         "cp_pred":    pred_contact[pi].tolist(),
                         "cp_gt":      gt_contact[gi].tolist(),
+                        "loc3d_gt":   gt_loc3d[gi].tolist(),
+                        "fx": fx, "fy": fy, "cx": cx, "cy": cy,
                     }
 
     return records
 
 
 def compute_metrics_on_keys(records, keys):
-    """Compute DE/AbsRel/δ1 for a subset of keys."""
+    """Compute DE/AbsRel/δ1/ALE for a subset of keys."""
     dist_pred, dist_gt = [], []
     depth_pred, depth_gt = [], []
     cp_pred, cp_gt = [], []
+    ale_errors = []
     for k in keys:
         r = records[k]
         dist_pred.append(r["dist_pred"])
@@ -133,12 +139,20 @@ def compute_metrics_on_keys(records, keys):
         depth_gt.append(r["depth_gt"])
         cp_pred.append(r["cp_pred"])
         cp_gt.append(r["cp_gt"])
+        if "loc3d_gt" in r:
+            u, v = r["cp_pred"]
+            Z = r["depth_pred"]
+            X_p = (u - r["cx"]) * Z / r["fx"]
+            Y_p = (v - r["cy"]) * Z / r["fy"]
+            X_g, Y_g, Z_g = r["loc3d_gt"]
+            ale_errors.append(float(np.sqrt((X_p-X_g)**2 + (Y_p-Y_g)**2 + (Z-Z_g)**2)))
 
     dist_m  = depth_metrics(np.array(dist_pred),  np.array(dist_gt))
     depth_m = depth_metrics(np.array(depth_pred), np.array(depth_gt))
     de  = distance_error(np.array(dist_pred), np.array(dist_gt))
     cpe = contact_point_error(np.array(cp_pred), np.array(cp_gt))
-    return dist_m, depth_m, de, cpe
+    ale = float(np.mean(ale_errors)) if ale_errors else float("nan")
+    return dist_m, depth_m, de, cpe, ale
 
 
 def main():
@@ -172,25 +186,25 @@ def main():
     print(f"\nIntersection: {len(common_keys)} pairs matched by all {len(args.ckpts)} models\n")
 
     # Print results on full set vs intersection
-    header = f"{'Model':<10} {'All pairs':>10} {'AbsRel':>8} {'DE':>8} {'δ1':>8} {'CPE':>8}"
+    header = f"{'Model':<10} {'All pairs':>10} {'AbsRel':>8} {'DE':>8} {'δ1':>8} {'CPE':>8} {'ALE':>8}"
     sep    = "-" * len(header)
     print("── Full set (each model's own detections) ──")
     print(header)
     print(sep)
     for name in names:
         rec = all_records[name]
-        dist_m, _, de, cpe = compute_metrics_on_keys(rec, rec.keys())
+        dist_m, _, de, cpe, ale = compute_metrics_on_keys(rec, rec.keys())
         print(f"{name:<10} {len(rec):>10} {dist_m['AbsRel']:>8.4f} {de:>8.4f}"
-              f" {dist_m['delta1']:>8.4f} {cpe:>8.4f}")
+              f" {dist_m['delta1']:>8.4f} {cpe:>8.4f} {ale:>8.4f}")
 
     print(f"\n── Fixed intersection ({len(common_keys)} pairs) ──")
     print(header)
     print(sep)
     for name in names:
         rec = all_records[name]
-        dist_m, _, de, cpe = compute_metrics_on_keys(rec, common_keys)
+        dist_m, _, de, cpe, ale = compute_metrics_on_keys(rec, common_keys)
         print(f"{name:<10} {len(common_keys):>10} {dist_m['AbsRel']:>8.4f} {de:>8.4f}"
-              f" {dist_m['delta1']:>8.4f} {cpe:>8.4f}")
+              f" {dist_m['delta1']:>8.4f} {cpe:>8.4f} {ale:>8.4f}")
 
     print()
 

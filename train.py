@@ -63,10 +63,17 @@ def parse_args():
     ap.add_argument("--depth-source", default=None,
                     help="Optional path to per-object depth JSON/npy "
                          "(stage-2 LiDAR-median depth).")
+    ap.add_argument("--dist-source", default=None,
+                    help="Optional path to lidar_gt JSON from prepare_lidar_gt.py "
+                         "to override distance GT with LiDAR-based values.")
+    ap.add_argument("--max-grad-norm", type=float, default=10.0,
+                    help="Gradient clipping max norm (default 10.0, use 2.0 for noisy GT).")
     ap.add_argument("--no-depth-gt", action="store_true",
                     help="Train without L_depth / L_scale (pure L_geo).")
     ap.add_argument("--hflip", action="store_true",
                     help="Enable horizontal flip aug (geometry-safe in our setup).")
+    ap.add_argument("--strong-aug", action="store_true",
+                    help="Stronger color jitter (0.4) + random crop (P=0.5).")
     # detection loss weights
     ap.add_argument("--w-box", type=float, default=7.5)
     ap.add_argument("--w-obj", type=float, default=1.0)
@@ -82,6 +89,9 @@ def parse_args():
     # resume
     ap.add_argument("--resume", default=None,
                     help="Path to checkpoint to resume from (.pt).")
+    ap.add_argument("--reset-best", action="store_true",
+                    help="Reset best_val to inf when resuming (useful when val_loss "
+                         "was best at early epoch due to bad training dynamics).")
     # pretrained backbone
     ap.add_argument("--pretrained-backbone", default=None, metavar="PATH",
                     help="Path to yolov8n.pt. Transplants backbone weights before "
@@ -99,15 +109,17 @@ def parse_args():
 def build_loaders(args):
     train_ds = KITTIOGCDEDataset(
         args.kitti_root, args.train_split,
-        img_size=args.img_size, augment=True,
+        img_size=args.img_size, augment=True, strong_aug=args.strong_aug,
         distance_mode=args.distance_mode, depth_mode=args.depth_mode,
         hflip=args.hflip, depth_source=args.depth_source,
+        dist_source=args.dist_source,
     )
     val_ds = KITTIOGCDEDataset(
         args.kitti_root, args.val_split,
         img_size=args.img_size, augment=False,
         distance_mode=args.distance_mode, depth_mode=args.depth_mode,
         depth_source=args.depth_source,
+        dist_source=args.dist_source,
     )
     train_loader = DataLoader(
         train_ds, batch_size=args.batch, shuffle=True,
@@ -167,7 +179,7 @@ def main():
         ckpt_r = torch.load(args.resume, map_location=device, weights_only=False)
         model.load_state_dict(ckpt_r["model"])
         start_epoch = ckpt_r["epoch"] + 1
-        best_val = ckpt_r.get("best_val", ckpt_r["val_loss"])
+        best_val = float("inf") if args.reset_best else ckpt_r.get("best_val", ckpt_r["val_loss"])
         # Scheduler restarted fresh (last_epoch=-1 = LR starts at args.lr).
         # Do NOT fast-forward: the old run may have used a different T_max,
         # fast-forwarding would reset LR to near-max and cause divergence.
@@ -228,7 +240,7 @@ def main():
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.max_grad_norm)
             if not torch.isfinite(grad_norm):
                 print(f"  [warn] non-finite grad norm, skipping update")
                 optimizer.zero_grad(set_to_none=True)

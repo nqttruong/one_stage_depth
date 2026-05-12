@@ -1,196 +1,282 @@
-# OGCDE One-Stage
+# OGCDE — One-Stage Geometry-aware Distance Estimation
 
-Reference implementation of a YOLO-style one-stage detector with geometry
-head for monocular distance estimation.
+## TL;DR
 
-## Core design (locked-in)
+OGCDE là một **one-stage detector** kết hợp phát hiện vật thể và ước lượng khoảng cách Euclidean trực tiếp từ ảnh RGB đơn lẻ, không cần LiDAR hay stereo camera. Trên KITTI với cùng split và cùng LiDAR GT của DistFormer, OGCDE đạt **δ<1.25 = 96.74%, AbsRel = 7.54%** — vượt DistFormer (93.67%, 10.39%) trong khi phải **tự detect bounding box**, không được cấp GT box như các baseline khác.
 
-```
-d  =  Z-depth (metric, from KITTI label_2 directly)
-s  =  geometric correction ≈ sec(θ),   θ = angle from optical axis
-distance  =  s · d  =  sqrt(x² + y² + z²)
-```
+---
 
-Each object prediction:
+## Problem
 
-```
-(x, y, w, h)      bbox
-obj, cls          detection scores
-d                 depth     (log-activated: d = exp(d_raw))
-s                 scale     (log-activated: s = exp(s_raw))
-(dx, dy)          contact offset from bbox bottom center
-distance = s · d  metric distance (geometry branch)
-```
+**Bài toán:** Ước lượng khoảng cách Euclidean thực tế (mét) đến từng vật thể trong ảnh từ một camera đơn (monocular), đồng thời detect vật thể và dự đoán vị trí chân vật thể trên mặt đất.
 
-Pipeline = **YOLOv8n-scale backbone + PAN-FPN neck + extended anchor-free
-head (9 + nc channels)** trained from scratch with multi-task loss + λ_geo
-warmup. Center-radius assignment with ATSS-style size filter.
+**Dataset:** KITTI Object Detection — 7,481 ảnh training, 3 class: Car / Pedestrian / Cyclist.
 
-## Layout
+**Baseline chính:** DistFormer (arXiv 2401.03191) — nhận GT bounding box làm input, chỉ predict distance.
+
+**Điểm khác biệt:** OGCDE giải bài toán khó hơn — **end-to-end một lần forward**: tự detect box + predict distance + depth + contact point.
+
+---
+
+## Method
+
+### Input / Output
 
 ```
-ogcde_onestage/
-  ogcde/
-    model.py          backbone + neck + OGCDEHead + decode helpers
-    loss.py           OGCDELoss + center-radius assigner (mutable lambdas)
-    dataset.py        KITTI loader, color jitter, opt-in H-flip, depth_source
-    metrics.py        AbsRel/RMSE/δ/DE/CPE/Stability + OGCDEEvaluator
-    utils.py          letterbox, NMS, decode_predictions
-  train.py            training entry point with λ_geo warmup
-  evaluate_kitti.py   runs full OGCDE metric suite on a KITTI split
-  inference.py        video/image-folder inference, includes Stability
-  split_kitti.py      build train/val split files
-  prepare_lidar_depth.py   stage-2 median-LiDAR-Z preprocessing
+Input : ảnh RGB (H × W × 3), bất kỳ kích thước → letterbox 640×640
+Output: per-object { bounding box, class, score, distance (m), depth Z (m), contact point (px) }
 ```
 
-## Quick start
+### Architecture
 
-### Stage 1 — train fast with bottom-Z depth GT
-
-```bash
-python split_kitti.py --kitti-root /data/kitti/training --out-dir splits/
-
-python train.py \
-    --kitti-root /media/truong/01DBB45ECE0C4E00/dl/kitti_object/training \
-    --train-split /media/truong/01DBB45ECE0C4E00/dl/kitti_object/splits/kitti_train.txt \
-    --val-split   /media/truong/01DBB45ECE0C4E00/dl/kitti_object/splits/kitti_val.txt \
-    --img-size 640 \
-    --batch 16 \
-    --epochs 100 \
-    --workers 4 \
-    --geo-warmup-epochs 10 \
-    --save-dir runs/ogcde_v1
+```
+Input (640×640×3)
+    │
+    ▼
+┌─────────────────────┐
+│  Backbone           │  YOLOv8m — Conv / C2f / SPPF
+│  (COCO pretrained)  │  → feature maps stride 8 / 16 / 32
+└──────────┬──────────┘
+           │ P3, P4, P5
+           ▼
+┌─────────────────────┐
+│  Neck (PAN-FPN)     │  top-down upsample + bottom-up downsample
+└──────────┬──────────┘
+           │ 3 scales
+           ▼
+┌─────────────────────┐
+│  OGCDEHead × 3      │  per cell: 9 + nc channels
+│                     │  [cx,cy,w,h | obj | cls×nc | d_raw | s_raw | dx,dy]
+└─────────────────────┘
 ```
 
-### Stage 2 — refine with median-LiDAR-Z depth GT
-
-```bash
-# Pre-compute per-object median LiDAR Z (one-time)
-python prepare_lidar_depth.py \
-    --kitti-root /data/kitti/training \
-    --split splits/kitti_train.txt \
-    --out cache/kitti_train_lidar.json
-
-python prepare_lidar_depth.py \
-    --kitti-root /data/kitti/training \
-    --split splits/kitti_val.txt \
-    --out cache/kitti_val_lidar.json
-
-# Re-train with the better depth
-python train.py \
-    --kitti-root /data/kitti/training \
-    --train-split splits/kitti_train.txt --val-split splits/kitti_val.txt \
-    --depth-source cache/kitti_train_lidar.json \
-    --epochs 50 --geo-warmup-epochs 5
-# (use a separate file for val if you also want LiDAR-eval depth metrics)
+**Decode:**
+```
+depth    = exp(d_raw)              # Z-axis depth (m), d_raw ∈ [-5, 6]
+distance = exp(d_raw + s_raw)      # Euclidean = depth × sec(θ), s_raw ∈ [-3, 3]
+contact  = bbox_bottom + dxdy × stride   # 2D ground contact point (px)
 ```
 
-### Evaluate
+`s_raw` học hệ số `sec(θ)` — bù góc lệch của vật thể so với trục quang học, tức là vật thể lệch sang trái/phải sẽ có distance > depth.
 
-```bash
-python evaluate_kitti.py \
-    --ckpt runs/ogcde/best.pt \
-    --kitti-root /data/kitti/training \
-    --split splits/kitti_val.txt
+### Loss Function
+
+```
+L = w_box · L_CIoU
+  + w_obj · L_BCE_objectness
+  + w_cls · L_focal_class
+  + λ₁ · L_depth          # log-L1 trên d_raw
+  + λ₂ · L_scale          # log-L1 trên s_raw
+  + λ₃ · L_contact        # L1 trên contact point offset
+  + λ_geo · L_geo         # linear-L1 trên distance (mét)
 ```
 
-### Run on video (with stability metric)
+Default weights: `w_box=5.0, w_obj=2.0, w_cls=0.5`, `λ_geo` warmup 0.1 → 2.0 trong 5 epoch.
 
-```bash
-python inference.py --ckpt runs/ogcde_v2/best.pt --source /media/truong/01DBB45ECE0C4E00/dl/one_stage_depth/video/12207144_1920_1080_30fps.mp4
-```
+**Target assignment:** center-radius ATSS — cell là positive nếu nằm trong GT box VÀ trong `center_radius = 1.5` stride của GT center.
 
-## Configuration decisions (locked-in)
+### Training — Two-Phase Strategy
 
-| Item | Value | Rationale |
+| | Phase 1 | Phase 2 |
 |---|---|---|
-| `d` interpretation | metric Z, `d_gt = z` | No external dependency; clean GT from KITTI |
-| `distance` | `sqrt(x²+y²+z²)` | Forces `s` to learn `sec(θ)` — geometry-aware insight |
-| `d`/`s` activation | `exp` (log-space learning) | Strict positivity; stable gradients across orders of magnitude |
-| `L_depth`, `L_scale` | log-space L1 | Same as activation; exponential-family-friendly |
-| `L_geo` | linear L1 on meters | Direct distance error — what the paper claims to optimize |
-| `λ_geo` schedule | linear 0.1 → 2.0 over 10 epochs | Avoids dominating early training |
-| Stage-1 `d_gt` | `z` of bottom center | Fast, debuggable |
-| Stage-2 `d_gt` | median LiDAR Z inside 3D box | More accurate for paper-grade numbers |
-| Augmentation | Color jitter (default ON) | P2-safe |
-| H-flip | Opt-in via `--hflip` | Geometry-safe in our 2D-target setup |
-| Mosaic | Excluded | Breaks projection geometry |
-| Backbone | From scratch, YOLOv8n-scale | Phase 1 stability; can port later |
-| Assigner | Center-radius + ATSS size filter | Distance is the metric of interest, not box AP |
-| Classes | 3 (Car incl. Van/Truck, Pedestrian incl. Person_sitting, Cyclist) | KITTI standard |
+| GT distance | Annotation (clean) | **LiDAR 10th-pct** (Zhu et al.) |
+| Epochs | 350 | 100 |
+| lr | 1e-4 → 3e-5 | 1e-5 |
+| max_grad_norm | 10.0 | 2.0 |
+| Mục đích | Convergence ổn định | Align với LiDAR distribution |
 
-## Why H-flip is geometry-safe here (and why P2 doesn't need updating)
+---
 
-You might have read that flipping needs `P2[0,2] := W − P2[0,2]`. That's
-true only if P2 is consumed *after* augmentation (e.g., re-projecting 3D
-points or doing differentiable rendering). Our pipeline uses P2 exactly
-once, at GT-load time, to project `loc` to 2D pixels. After that, the
-target is `(boxes_2d, contact_2d, scalar dist, scalar depth)`. A
-horizontal flip:
+## Results
 
-- mirrors `boxes_2d` and `contact_2d` correctly via `u → W − u`,
-- doesn't touch `dist = ||xyz||` (invariant to x sign flip),
-- doesn't touch `depth = z` (z is independent of x).
+### OGCDE v7 — Custom split (5985 train), Annotation GT
 
-So all four targets remain consistent without ever re-touching P2. H-flip
-is opt-in (`--hflip`) only because we wanted to be explicit about it.
+| Split | Pairs | δ<1.25↑ | AbsRel↓ | RMSE↓ | mAP |
+|---|---|---|---|---|---|
+| Val (1,196 ảnh) | 4,779 | **99.79%** | **2.19%** | **1.136 m** | 0.540 |
+| Test (300 ảnh) | 1,117 | 99.46% | 2.27% | 1.186 m | 0.548 |
 
-## λ_geo warmup (implementation)
+### OGCDE LiDAR P2 vs DistFormer — Chen split (3711 train), LiDAR GT
 
-```python
-def lambda_geo_schedule(epoch, warmup=10, start=0.1, end=2.0):
-    if epoch >= warmup:
-        return end
-    return start + (end - start) * (epoch / warmup)
+| Method | Box input | n | δ<1.25↑ | AbsRel↓ | SqRel↓ | RMSE↓ | RMSElog↓ |
+|---|---|---|---|---|---|---|---|
+| DistFormer | **GT box** | all GT | 93.67% | 10.39% | 0.32 | **2.95 m** | 0.150 |
+| **OGCDE LiDAR P2** (IoU) | **Tự detect** | 13,085 | **96.74%** | **7.54%** | **0.313** | 3.67 m | **0.098** |
+| OGCDE LiDAR P2 (Oracle) | GT center | 17,499 | 86.58% | 11.87% | 1.045 | 6.58 m | 0.233 |
+
+Per-class — IoU mode, LiDAR GT:
+
+| Class | n | δ<1.25↑ | AbsRel↓ | RMSE↓ | vs DistFormer |
+|---|---|---|---|---|---|
+| Car | 11,912 | **96.85%** | **7.44%** | 3.81 m | ✅ OGCDE tốt hơn |
+| Pedestrian | 1,008 | 95.04% | 8.50% | 1.66 m | ❌ DistFormer tốt hơn |
+| Cyclist | 165 | **98.79%** | 8.43% | 1.91 m | ✅ OGCDE tốt hơn |
+
+### Inference Speed (RTX 4070 Laptop, 640×640, batch=1)
+
+| Stage | FPS | Latency |
+|---|---|---|
+| Model forward | 92.5 FPS | 10.8 ms |
+| + NMS decode | 89.0 FPS | 11.2 ms |
+| **Full pipeline** (letterbox+infer+decode) | **84.0 FPS** | **11.9 ms** |
+
+---
+
+## Repo Structure
+
+```
+one_stage_depth/
+├── ogcde/
+│   ├── model.py          # OGCDENet, OGCDEHead, decode helpers
+│   ├── loss.py           # OGCDELoss, assign_targets (ATSS)
+│   ├── dataset.py        # KITTIOGCDEDataset — supports dist_source, depth_source
+│   ├── metrics.py        # OGCDEEvaluator, MAPEvaluator (AP + AP3D)
+│   ├── utils.py          # decode_predictions, letterbox, unletterbox
+│   └── oracle.py         # OracleEvaluator — eval không cần IoU matching
+│
+├── train.py              # training loop (AMP, warmup, resume, --dist-source)
+├── evaluate_kitti.py     # eval: --mode iou/oracle/both, --lidar-gt
+├── inference.py          # inference trên image / video / webcam
+├── test_kitti.py         # full test eval + visualization + 6 plots
+├── split_kitti.py        # tạo train/val/test splits
+├── prepare_lidar_gt.py   # extract LiDAR GT distance (Zhu et al. 10th-pct)
+│
+├── runs/
+│   ├── ogcde_v7/best.pt          # v7 best (ep 251, custom split, ann GT)
+│   ├── ogcde_lidar_p2/best.pt    # LiDAR P2 best (ep ~430, Chen split, LiDAR GT)
+│   ├── RESULTS.md                # full results
+│   └── COMPARISON.md             # detailed comparison vs DistFormer
+│
+└── cache/
+    ├── lidar_gt_train.json       # LiDAR GT (3,711 train images)
+    └── lidar_gt_val.json         # LiDAR GT (3,768 val images)
 ```
 
-Called once per epoch in `train.py`; pushes the new value into the loss
-via `criterion.set_lambda_geo(lg)`.
+---
 
-## Honest limitations / what's NOT in this code
+## Reproduce
 
-1. **Stability metric requires sequence data.** KITTI training/val is
-   single-frame. Use KITTI Tracking or your own video with the simple IoU
-   tracker in `inference.py`. For real publishable numbers, swap in
-   ByteTrack/OC-SORT.
-2. **Backbone from scratch.** Phase-2 plan is to port to Ultralytics
-   YOLOv8 with COCO weights — recipe sketched below, not wired in.
-3. **TaskAlignedAssigner not implemented.** Center-radius is fine for
-   distance learning; if you want to claim YOLOv8-parity AP, add it as an
-   ablation row (~200 LOC inside `loss.py::assign_targets`).
-4. **No principled objective re-weighting between depth/scale/geo.** Currently
-   λ_geo is the only thing that's scheduled. Auto-balancing schemes
-   (uncertainty weighting, GradNorm) are an open avenue.
-5. **`prepare_lidar_depth.py` requires Velodyne `.bin` files.** Not all
-   KITTI subsets ship them; if you only have label_2 + image_2 + calib,
-   you can only do stage-1.
+### Requirements
 
-## Phase-2: Port to Ultralytics YOLOv8 (sketch, not wired in)
-
-```python
-from ultralytics.nn.tasks import DetectionModel
-from ogcde.model import OGCDEHead
-
-yolo = DetectionModel(cfg='yolov8n.yaml')
-yolo.load('yolov8n.pt')
-yolo.model[-1] = OGCDEHead(nc=3, ch=(64, 128, 256))   # replace Detect
+```bash
+pip install torch torchvision numpy opencv-python
+# Tested: Python 3.11, PyTorch 2.x, CUDA 12.x
 ```
 
-Then `train.py`'s forward becomes `yolo.forward(x)`, and `OGCDELoss` works
-unchanged.
+### Data Preparation
 
-## Citation key idea
+Download KITTI Object Detection:
+- `data_object_image_2.zip` — RGB images
+- `data_object_label_2.zip` — annotations
+- `data_object_calib.zip` — calibration
+- `data_object_velodyne.zip` — LiDAR *(chỉ cần cho Phase 2)*
 
-> We reformulate monocular distance estimation as a one-stage detection
-> problem, where geometry (contact point + scale) is learned implicitly
-> via multi-task loss. Under `distance = s · d`, the depth branch learns
-> metric Z while the scale branch absorbs the per-object geometric
-> correction `sec(θ)` — yielding a single real-time pipeline that
-> bypasses the depth-map → calibration cascade.
+```
+kitti_object/
+└── training/
+    ├── image_2/      # 7481 .png
+    ├── label_2/      # 7481 .txt
+    ├── calib/        # 7481 .txt
+    └── velodyne/     # 7481 .bin  (optional)
+```
 
-## What this is, and what it isn't
+Tạo Chen et al. split:
+```bash
+mkdir -p splits
+wget -O splits/distformer_train.txt \
+    https://raw.githubusercontent.com/charlesq34/frustum-pointnets/master/kitti/image_sets/train.txt
+wget -O splits/distformer_val.txt \
+    https://raw.githubusercontent.com/charlesq34/frustum-pointnets/master/kitti/image_sets/val.txt
+```
 
-> This is **geometry-aware distance learning** — not depth estimation, not
-> 3D detection. The model never produces a dense depth map and never
-> regresses a 3D bounding box. It produces, per detected object, a single
-> scalar metric distance with explicit per-object geometric structure.
+### Phase 1 — Train (Annotation GT)
+
+```bash
+python train.py \
+    --kitti-root /path/to/kitti/training \
+    --train-split splits/distformer_train.txt \
+    --val-split   splits/distformer_val.txt \
+    --backbone-size m --pretrained-backbone yolov8m.pt \
+    --freeze-backbone-epochs 10 \
+    --epochs 350 --batch 16 --lr 1e-4 --weight-decay 5e-4 \
+    --focal-gamma 1.5 --hflip --strong-aug --geo-warmup-epochs 5 \
+    --w-box 5.0 --w-obj 2.0 --w-cls 0.5 --cls-weights 1.0 3.0 5.0 \
+    --save-dir runs/ogcde_phase1 \
+    2>&1 | tee runs/ogcde_phase1.log
+```
+
+### Prepare LiDAR GT (cần velodyne/)
+
+```bash
+python prepare_lidar_gt.py \
+    --kitti-root /path/to/kitti/training \
+    --split splits/distformer_train.txt \
+    --out   cache/lidar_gt_train.json
+
+python prepare_lidar_gt.py \
+    --kitti-root /path/to/kitti/training \
+    --split splits/distformer_val.txt \
+    --out   cache/lidar_gt_val.json
+```
+
+### Phase 2 — Fine-tune (LiDAR GT)
+
+```bash
+python train.py \
+    --resume runs/ogcde_phase1/best.pt \
+    --reset-best --backbone-size m \
+    --kitti-root /path/to/kitti/training \
+    --train-split splits/distformer_train.txt \
+    --val-split   splits/distformer_val.txt \
+    --dist-source cache/lidar_gt_train.json \
+    --epochs 450 --batch 16 --lr 1e-5 --weight-decay 5e-4 \
+    --focal-gamma 1.5 --hflip --strong-aug --geo-warmup-epochs 0 \
+    --w-box 5.0 --w-obj 2.0 --w-cls 0.5 --cls-weights 1.0 3.0 5.0 \
+    --freeze-backbone-epochs 0 --max-grad-norm 2.0 \
+    --save-dir runs/ogcde_lidar_p2 \
+    2>&1 | tee runs/ogcde_lidar_p2.log
+```
+
+### Evaluation
+
+```bash
+# Standard IoU eval
+python evaluate_kitti.py \
+    --ckpt runs/ogcde_lidar_p2/best.pt \
+    --kitti-root /path/to/kitti/training \
+    --split splits/distformer_val.txt \
+    --mode iou
+
+# Fair comparison với DistFormer (LiDAR GT, cả IoU + Oracle)
+python evaluate_kitti.py \
+    --ckpt runs/ogcde_lidar_p2/best.pt \
+    --kitti-root /path/to/kitti/training \
+    --split splits/distformer_val.txt \
+    --mode both \
+    --lidar-gt cache/lidar_gt_val.json \
+    --save-json results.json
+```
+
+### Inference
+
+```bash
+# Ảnh đơn
+python inference.py --ckpt runs/ogcde_lidar_p2/best.pt --source image.jpg
+
+# Video
+python inference.py --ckpt runs/ogcde_lidar_p2/best.pt --source video.mp4 --save-video
+
+# Webcam real-time (~84 FPS)
+python inference.py --ckpt runs/ogcde_lidar_p2/best.pt --source 0
+```
+
+### Hardware
+
+| | Minimum | Tested |
+|---|---|---|
+| GPU VRAM | 6 GB | RTX 4070 Laptop (8 GB) |
+| RAM | 16 GB | 32 GB |
+| Storage | 15 GB (không LiDAR) | SSD |
+| Storage + LiDAR | 42 GB | SSD |
+| Training Phase 1 | — | ~10 h |
+| Training Phase 2 | — | ~3 h |
