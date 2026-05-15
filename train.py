@@ -17,6 +17,7 @@ import os
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
@@ -42,9 +43,9 @@ def lambda_geo_schedule(epoch: int, warmup_epochs: int = 10,
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--kitti-root", required=True)
-    ap.add_argument("--train-split", required=True)
-    ap.add_argument("--val-split", required=True)
+    ap.add_argument("--kitti-root",   default=None)
+    ap.add_argument("--train-split",  default=None)
+    ap.add_argument("--val-split",    default=None)
     ap.add_argument("--img-size", type=int, default=640)
     ap.add_argument("--batch", type=int, default=16)
     ap.add_argument("--epochs", type=int, default=100)
@@ -80,12 +81,20 @@ def parse_args():
     ap.add_argument("--w-cls", type=float, default=0.5)
     # geometry loss lambdas
     ap.add_argument("--w-cp", type=float, default=1.0,
-                    help="λ_contact weight (default 1.0). Set lower (e.g. 0.3) to "
-                         "reduce contact-point dominance in total loss.")
+                    help="λ_contact weight (default 1.0).")
     ap.add_argument("--focal-gamma", type=float, default=1.5,
                     help="Focal loss gamma for obj/cls BCE (0 = plain BCE).")
     ap.add_argument("--cls-weights", type=float, nargs="+", default=None,
                     help="Per-class loss weights e.g. '1.0 3.0 5.0' for Car/Ped/Cyclist.")
+    # ablation flags
+    ap.add_argument("--no-s-head", action="store_true",
+                    help="Ablation V1/V2: disable sec(θ) head — distance ≡ depth.")
+    ap.add_argument("--no-contact", action="store_true",
+                    help="Ablation V1: disable contact point supervision.")
+    ap.add_argument("--seed", type=int, default=None,
+                    help="Random seed for reproducibility (set same across ablation runs).")
+    ap.add_argument("--config", default=None,
+                    help="Optional YAML config file; values override argparse defaults.")
     # resume
     ap.add_argument("--resume", default=None,
                     help="Path to checkpoint to resume from (.pt).")
@@ -136,17 +145,44 @@ def build_loaders(args):
 
 def main():
     args = parse_args()
-    Path(args.save_dir).mkdir(parents=True, exist_ok=True)
 
+    # YAML config override (ablation convenience)
+    if args.config is not None:
+        import yaml
+        with open(args.config) as f:
+            cfg = yaml.safe_load(f)
+        for k, v in cfg.items():
+            k_attr = k.replace("-", "_")
+            if hasattr(args, k_attr):
+                setattr(args, k_attr, v)
+
+    # Seed for reproducibility
+    if args.seed is not None:
+        import random
+        random.seed(args.seed)
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(args.seed)
+
+    for required in ("kitti_root", "train_split", "val_split"):
+        if getattr(args, required) is None:
+            raise ValueError(f"--{required.replace('_','-')} is required (set via CLI or --config YAML)")
+
+    Path(args.save_dir).mkdir(parents=True, exist_ok=True)
     device = torch.device(args.device)
     model = OGCDENet(nc=args.num_classes, backbone_size=args.backbone_size).to(device)
+    _l_scale   = 0.0 if args.no_s_head  else 0.5
+    _l_contact = 0.0 if args.no_contact else args.w_cp
     criterion = OGCDELoss(
         nc=args.num_classes,
-        lambdas=(1.0, 0.5, args.w_cp, 2.0),
+        lambdas=(1.0, _l_scale, _l_contact, 2.0),
         det_weights=(args.w_box, args.w_obj, args.w_cls),
         has_depth_gt=not args.no_depth_gt,
         focal_gamma=args.focal_gamma,
         cls_weights=args.cls_weights,
+        use_s_head=not args.no_s_head,
+        use_contact_point=not args.no_contact,
     ).to(device)
 
     # Load pretrained backbone before optimizer init (so frozen params are excluded)

@@ -1,0 +1,24 @@
+# V4: + lambda_geo warmup (5 epochs)
+kitti_root: /media/truong/01DBB45ECE0C4E00/dl/kitti_object/training
+train_split: /media/truong/01DBB45ECE0C4E00/dl/kitti_object/splits/distformer_train.txt
+val_split:   /media/truong/01DBB45ECE0C4E00/dl/kitti_object/splits/distformer_val.txt
+backbone_size: m
+pretrained_backbone: yolov8m.pt
+freeze_backbone_epochs: 10
+epochs: 300
+batch: 16
+lr: 0.0001
+weight_decay: 0.0005
+focal_gamma: 1.5
+hflip: true
+strong_aug: true
+geo_warmup_epochs: 5
+w_box: 5.0
+w_obj: 2.0
+w_cls: 0.5
+w_cp: 1.0
+seed: 42
+no_s_head: false
+no_contact: false
+cls_weights: [1.0, 1.0, 1.0]
+save_dir: runs/ablation/v4_warmup

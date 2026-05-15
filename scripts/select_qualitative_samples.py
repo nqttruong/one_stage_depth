@@ -45,11 +45,11 @@ PANELS = {
         title="(a) Near Car",
         class_id=0,
         dist_min=8.0, dist_max=15.0,
+        absrel_min=0.02,   # want visible but small error (2-5%)
         absrel_max=0.05,
         occluded_max=0,
-        absrel_min=None,
         want_failure=False,
-        rank_by="absrel_asc",   # lowest AbsRel first
+        rank_by="absrel_asc",
     ),
     "panel_b": dict(
         title="(b) Far Car (>50m)",

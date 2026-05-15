@@ -183,10 +183,14 @@ class OGCDELoss(nn.Module):
                  det_weights=(7.5, 1.0, 0.5),
                  has_depth_gt=True,
                  focal_gamma: float = 1.5,
-                 cls_weights=None):
+                 cls_weights=None,
+                 use_s_head: bool = True,
+                 use_contact_point: bool = True):
         super().__init__()
         self.nc = nc
         self.strides = strides
+        self.use_s_head = use_s_head           # False = distance ≡ depth (no sec θ)
+        self.use_contact_point = use_contact_point  # False = skip contact/geo loss
         # Mutable so train loop can warmup λ_geo etc.
         self.lambdas = list(lambdas)
         self.w_box, self.w_obj, self.w_cls = det_weights
@@ -305,24 +309,30 @@ class OGCDELoss(nn.Module):
                 s_raw = dec["s_raw"][b, pos_idx]
                 dxdy_raw = dec["dxdy"][b, pos_idx]
 
-                d_pred, s_pred, dist_pred = decode_depth_scale(d_raw, s_raw)
-
-                # depth: |log(d_pred) - log(d_gt)|
+                # depth supervision (always on when has_depth_gt)
                 if self.has_depth_gt and gt_depth is not None:
                     depth_loss = depth_loss + (
                         d_raw - gt_depth[gt_idx].clamp(min=1e-3).log()
                     ).abs().mean()
 
-                    # scale GT: s_gt = dist / depth
-                    s_gt = (gt_dist[gt_idx] / gt_depth[gt_idx].clamp(min=1e-3)).clamp(min=1e-3)
-                    scale_loss = scale_loss + (s_raw - s_gt.log()).abs().mean()
+                if self.use_s_head:
+                    d_pred, s_pred, dist_pred = decode_depth_scale(d_raw, s_raw)
+                    # scale supervision: s_gt = dist / depth
+                    if self.has_depth_gt and gt_depth is not None:
+                        s_gt = (gt_dist[gt_idx] / gt_depth[gt_idx].clamp(min=1e-3)).clamp(min=1e-3)
+                        scale_loss = scale_loss + (s_raw - s_gt.log()).abs().mean()
+                else:
+                    # V1/V2 ablation: distance ≡ depth (no sec θ correction)
+                    d_pred = torch.exp(d_raw.clamp(min=-5, max=6))
+                    dist_pred = d_pred
 
-                # contact point — fp32 for sqrt gradient stability
-                pred_cp = decode_contact(dxdy_raw, pred_xywh.detach(), stride)
-                contact_loss = contact_loss + (
-                    (pred_cp.float() - gt_contact[gt_idx].float())
-                    .pow(2).sum(-1).clamp(min=1e-4).sqrt()
-                ).mean()
+                if self.use_contact_point:
+                    # contact point — fp32 for sqrt gradient stability
+                    pred_cp = decode_contact(dxdy_raw, pred_xywh.detach(), stride)
+                    contact_loss = contact_loss + (
+                        (pred_cp.float() - gt_contact[gt_idx].float())
+                        .pow(2).sum(-1).clamp(min=1e-4).sqrt()
+                    ).mean()
 
                 # geometry consistency: |distance_pred - distance_gt|
                 geo_loss = geo_loss + (dist_pred - gt_dist[gt_idx]).abs().mean()
