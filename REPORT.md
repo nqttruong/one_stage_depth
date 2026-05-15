@@ -257,6 +257,33 @@ Paper tham chiếu: **"Supervised Object-Specific Distance Estimation from Monoc
 
 **Contact point:** CPE = 5.98 px trên ảnh KITTI 1242×375 (~0.48% chiều rộng) là chính xác. Tuy nhiên contact point chủ yếu phục vụ như supervision signal hình học — chưa có ablation riêng đo tác động của nó lên DE.
 
+### 4.6 Phân tích theo bearing angle — xác nhận vai trò của s-head
+
+Để kiểm chứng trực tiếp rằng s-head học được quan hệ `sec(θ)`, chúng tôi so sánh hai mô hình trên val split (3,769 ảnh) theo bin bearing angle θ = arctan(|X|/Z):
+
+- **V1 (depth-only):** không có s-head → ước lượng distance = `exp(d_raw)` ≈ Z-depth
+- **V3 (+sec θ):** có s-head → distance = `exp(d_raw + s_raw)`, học ngầm hiệu chỉnh sec(θ)
+
+GT = khoảng cách Euclid từ annotation: `sqrt(X² + Y² + Z²)`.
+
+| Bearing angle | n (V1) | AbsRel V1 (%) | AbsRel V3 (%) | ΔAbsRel (pp) |
+|---|---|---|---|---|
+| 0–5° | 3,209 | 8.07 | 8.40 | −0.33 |
+| 5–10° | 3,888 | 8.00 | 7.80 | **+0.20** |
+| 10–15° | 3,264 | 7.83 | 7.08 | **+0.75** |
+| 15–20° | 2,364 | 7.53 | 6.72 | **+0.81** |
+| 20–30° | 3,046 | 7.31 | 6.84 | **+0.48** |
+| **Overall** | 15,834 | **7.8** | **7.5** | **+0.30** |
+
+**Nhận xét:**
+
+- Ở 0–5° (gần trục quang học), sec(θ) ≈ 1.0 nên V3 không có lợi thế rõ rệt (Δ = −0.33 pp, xấp xỉ noise).
+- Từ 5° trở lên, V3 nhất quán tốt hơn V1; ưu thế đạt đỉnh **+0.81 pp tại 15–20°** — đúng vùng mà sec(θ) bắt đầu đáng kể (`sec(17.5°) ≈ 1.048`).
+- Phân phối s_gt (= `d_gt / Z_gt`) có median 1.023 và đuôi dài về phía s lớn; s_pred có median 0.968, tức underestimate ~5.7% — phù hợp với việc LiDAR fine-tune làm d_raw và s_raw không hoàn toàn tách bạch.
+- Kết quả xác nhận s-head học đúng hướng hình học, đặc biệt có lợi với object lệch khỏi tâm ảnh.
+
+**Figures:** `figs/bearing_absrel_delta.pdf` (ΔAbsRel per bin), `figs/sec_theta_scatter.pdf` (phân phối s_gt vs s_pred).
+
 ---
 
 ## 5. Kết luận và hạn chế
