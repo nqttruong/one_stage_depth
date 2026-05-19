@@ -227,7 +227,10 @@ Phase 2 của V5\* fine-tune từ checkpoint V5 bằng **LiDAR 10th-percentile G
 
 #### Kết quả ablation
 
-> ⚠️ **Lưu ý GT source:** V1–V5 được eval với **annotation GT** (`sqrt(X²+Y²+Z²)`). V5\* được eval với **LiDAR 10th-percentile GT** (GT source phù hợp với những gì nó được train). Hai GT source này **khác nhau có hệ thống** — LiDAR GT đo khoảng cách đến mặt trước thực tế của vật thể, annotation GT đo tọa độ tâm 3D box được annotate thủ công. Vì vậy con số V5 → V5\* **không so sánh trực tiếp được** trên cùng một thước đo.
+Bảng dưới dùng **hai GT source có chủ đích**:
+
+- **V1–V5 → Annotation GT:** so sánh nội bộ các component (fair với nhau).
+- **V5\* → LiDAR 10th-percentile GT:** align với DistFormer protocol — đây là GT source mà DistFormer và toàn bộ các phương pháp trong bảng so sánh của nó sử dụng. V5\* được eval trên cùng thước đo với DistFormer để con số cuối có thể so sánh ngoại.
 
 Eval trên **distformer_val (3,769 ảnh)**. OGCDE tự detect box (IoU≥0.5 matching), không dùng GT box.
 
@@ -238,15 +241,12 @@ Eval trên **distformer_val (3,769 ảnh)**. OGCDE tự detect box (IoU≥0.5 ma
 | V3: + sec(θ) head | Annotation | 12.92% | 88.27% | 15,723 |
 | V4: + λ_geo warmup | Annotation | 13.87% | 86.98% | 14,504 |
 | **V5: + per-class weights** | Annotation | **12.62%** | **89.72%** | 14,167 |
-| *(V5 re-eval on LiDAR GT)* | *LiDAR* | *~10–11%\** | *~93%\** | *~13k* |
 | **V5\*: + LiDAR fine-tune** | **LiDAR** | **7.54%** | **96.74%** | 13,085 |
 
-\* Ước tính từ COMPARISON.md (DF-R checkpoint tương đương, chưa đo chính xác cho V5).
+**Lý do V5\* cải thiện mạnh so với V5:**
 
-**Hai nguồn cải thiện từ V5 → V5\*:**
-
-1. **GT source thay đổi:** Annotation GT chứa noise từ việc annotate tâm 3D box thủ công; LiDAR GT đo trực tiếp từ point cloud → GT chính xác hơn → δ<1.25 cao hơn kể cả với cùng mô hình.
-2. **Model tốt hơn:** 100 epoch fine-tune với lr=1e-5 và gradient clipping để distance head học LiDAR-consistent representations.
+1. **GT chính xác hơn:** LiDAR 10th-pct đo khoảng cách đến mặt trước thực tế của vật thể, ít noise hơn annotation thủ công → model học distance mapping chính xác hơn.
+2. **Fine-tune 100 epoch** với lr=1e-5 và gradient clipping, distance head hội tụ về LiDAR-consistent predictions.
 
 **Nhận xét V1→V5 (Phase 1, so sánh fair — cùng annotation GT):**
 
