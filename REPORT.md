@@ -227,24 +227,33 @@ Phase 2 của V5\* fine-tune từ checkpoint V5 bằng **LiDAR 10th-percentile G
 
 #### Kết quả ablation
 
-Eval trên **distformer_val (3,769 ảnh)**, GT = annotation euclidean distance. OGCDE tự detect box (IoU≥0.5 matching); eval không dùng GT box.
+> ⚠️ **Lưu ý GT source:** V1–V5 được eval với **annotation GT** (`sqrt(X²+Y²+Z²)`). V5\* được eval với **LiDAR 10th-percentile GT** (GT source phù hợp với những gì nó được train). Hai GT source này **khác nhau có hệ thống** — LiDAR GT đo khoảng cách đến mặt trước thực tế của vật thể, annotation GT đo tọa độ tâm 3D box được annotate thủ công. Vì vậy con số V5 → V5\* **không so sánh trực tiếp được** trên cùng một thước đo.
 
-| Variant | AbsRel ↓ | δ<1.25 ↑ | n matched |
-|---|---|---|---|
-| V1: baseline | 13.09% | 86.96% | 16,814 |
-| V2: + contact point | 13.58% | 85.73% | 16,049 |
-| V3: + sec(θ) head | 12.92% | 88.27% | 15,723 |
-| V4: + λ_geo warmup | 13.87% | 86.98% | 14,504 |
-| **V5: + per-class weights** | **12.62%** | **89.72%** | 14,167 |
-| **V5\*: + LiDAR fine-tune** | **7.54%** | **96.74%** | 13,085 |
+Eval trên **distformer_val (3,769 ảnh)**. OGCDE tự detect box (IoU≥0.5 matching), không dùng GT box.
 
-**Nhận xét:**
+| Variant | Eval GT | AbsRel ↓ | δ<1.25 ↑ | n matched |
+|---|---|---|---|---|
+| V1: baseline | Annotation | 13.09% | 86.96% | 16,814 |
+| V2: + contact point | Annotation | 13.58% | 85.73% | 16,049 |
+| V3: + sec(θ) head | Annotation | 12.92% | 88.27% | 15,723 |
+| V4: + λ_geo warmup | Annotation | 13.87% | 86.98% | 14,504 |
+| **V5: + per-class weights** | Annotation | **12.62%** | **89.72%** | 14,167 |
+| *(V5 re-eval on LiDAR GT)* | *LiDAR* | *~10–11%\** | *~93%\** | *~13k* |
+| **V5\*: + LiDAR fine-tune** | **LiDAR** | **7.54%** | **96.74%** | 13,085 |
 
-- **Contact point (V1→V2):** CP alone làm tăng AbsRel nhẹ (+0.49 pp). CP không cải thiện trực tiếp distance accuracy — vai trò chính của nó là làm anchor hình học cho geometry loss.
-- **sec(θ) head (V2→V3):** Bước cải thiện đơn lớn nhất trong Phase 1 (−0.66 pp AbsRel, +2.54 pp δ<1.25). Xác nhận bằng bearing angle analysis: từ 10° trở lên, V3 vượt V1 đến +0.81 pp.
-- **λ_geo warmup (V3→V4):** V4 kém hơn V3 tại epoch 300 — warmup làm chậm convergence; lợi ích nằm ở giai đoạn sớm hơn (ổn định detection loss).
-- **Synergy (V5):** Khi kết hợp tất cả components, V5 đạt AbsRel tốt nhất Phase 1 (12.62%) — các thành phần phụ trợ nhau dù từng bước riêng lẻ không đơn điệu.
-- **LiDAR fine-tune (V5\*):** Cải thiện lớn nhất: −5.08 pp AbsRel, từ 12.62% xuống **7.54%**. Stage-2 sử dụng GT chính xác hơn (LiDAR 10th-pct thay vì annotation Z).
+\* Ước tính từ COMPARISON.md (DF-R checkpoint tương đương, chưa đo chính xác cho V5).
+
+**Hai nguồn cải thiện từ V5 → V5\*:**
+
+1. **GT source thay đổi:** Annotation GT chứa noise từ việc annotate tâm 3D box thủ công; LiDAR GT đo trực tiếp từ point cloud → GT chính xác hơn → δ<1.25 cao hơn kể cả với cùng mô hình.
+2. **Model tốt hơn:** 100 epoch fine-tune với lr=1e-5 và gradient clipping để distance head học LiDAR-consistent representations.
+
+**Nhận xét V1→V5 (Phase 1, so sánh fair — cùng annotation GT):**
+
+- **Contact point (V1→V2):** CP alone làm tăng AbsRel nhẹ (+0.49 pp). Vai trò chính của CP là anchor hình học cho geometry loss, không trực tiếp cải thiện distance.
+- **sec(θ) head (V2→V3):** Cải thiện lớn nhất Phase 1 (−0.66 pp AbsRel, +2.54 pp δ<1.25). Xác nhận bằng bearing angle analysis: V3 vượt V1 đến +0.81 pp ở 15–20°.
+- **λ_geo warmup (V3→V4):** V4 kém hơn V3 ở epoch 300 — warmup làm chậm convergence ban đầu; lợi ích là ổn định detection loss ở giai đoạn sớm.
+- **Synergy (V5):** Kết hợp tất cả, V5 đạt AbsRel tốt nhất Phase 1 (12.62%) dù các bước riêng lẻ không đơn điệu.
 
 #### Lưu ý về eval protocol
 
