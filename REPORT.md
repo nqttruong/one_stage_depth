@@ -208,43 +208,85 @@ Config thay đổi so với v1: focal loss (γ=1.5), fp32 loss computation, H-fl
 
 **Nhận xét v2 vs v1:** v2 detect được nhiều object hơn (4,971 vs 4,257 matched pairs, +17%) nhờ focal loss và loss weight tuning. Tuy nhiên các distance metrics tuyệt đối kém hơn v1 — nhiều khả năng vì v2 detect thêm các object khó (xa, nhỏ) vốn có sai số distance cao hơn, kéo DE và AbsRel lên. Val loss không so sánh trực tiếp được giữa v1 và v2 do thay đổi loss function.
 
-### 4.3 Ablation — trạng thái hiện tại
+### 4.3 Ablation Study (V1–V5*)
 
-| Config | Backbone | H-flip | Focal | λ_cp | Pairs | DE (m) | AbsRel | δ₁ | CPE (px) |
-|---|---|---|---|---|---|---|---|---|---|
-| **ogcde_v1** (ep 98) | scratch | OFF | OFF | 1.0 | 4,257 | **1.107** | **0.0402** | **99.22%** | 5.977 |
-| **ogcde_v2** (ep 63) | scratch | ON | γ=1.5 | 1.0 | 4,971 | 1.295 | 0.0438 | 98.85% | 6.353 |
-| **ogcde_v3** (ep 75) | scratch | ON | γ=1.5 | **0.3** | 5,395 | 1.359 | 0.0451 | 98.61% | 6.428 |
-| **ogcde_v4** (ep 143) | **YOLOv8n COCO** | ON | γ=1.5 | 1.0 | 5,206 | 1.348 | 0.0452 | 98.66% | **6.242** |
+#### Training setup
 
-**Đánh giá công bằng — Fixed Intersection (3,915 pairs được phát hiện bởi CẢ 4 models):**
+Tất cả variants dùng chung backbone **YOLOv8m pretrained COCO**, input 640×640, batch 16, AdamW (lr=1e-4 → cosine, wd=5e-4), strong augmentation + H-flip. Train split: **3,711 ảnh** (Chen et al. / DistFormer split). Mỗi variant thêm một thành phần so với variant trước.
 
-| Config | Pairs | AbsRel | DE (m) | δ₁ | CPE (px) |
-|---|---|---|---|---|---|
-| **ogcde_v1** | 3,915 | **0.0378** | **1.034** | **99.44%** | 5.575 |
-| **ogcde_v2** | 3,915 | 0.0390 | 1.075 | 99.41% | 5.638 |
-| **ogcde_v3** | 3,915 | 0.0386 | 1.062 | 99.34% | 5.582 |
-| **ogcde_v4** | 3,915 | 0.0398 | 1.116 | 99.21% | **5.439** |
-
-**Nhận xét ablation:**
-
-- **Recall confounding:** So sánh trên full set bị nhiễu bởi recall. v1 "tốt nhất" trên full set chỉ vì nó bỏ sót nhiều object khó — DE/AbsRel trên tập riêng của nó dễ hơn. Trên intersection 3,915 pairs, gap thu hẹp đáng kể: v1→v4 chỉ còn 0.082m thay vì 0.241m.
-- **λ_cp (v3):** Trên intersection, v3 TỐTHƠN v2 về DE (1.062 vs 1.075m) — nghĩa là giảm λ_cp thực sự giúp distance accuracy trên các object chung. Nhưng nó làm model bỏ sót thêm objects khó, kéo full-set DE lên. Trade-off: precision↑ recall↓.
-- **Pretrained backbone (v4):** CPE tốt nhất trên intersection (5.44px) — xác nhận pretrained features cải thiện contact point geometry. AbsRel và DE kém hơn v1/v2/v3 trên intersection: backbone pretrained giúp detect nhiều hơn nhưng chưa fine-tune đủ sâu cho KITTI distance regression.
-- **Kết luận:** Không có model nào rõ ràng tốt nhất trên mọi metric. v1 tốt nhất về distance accuracy, v4 tốt nhất về contact point geometry.
-
-### 4.4 So sánh với paper liên quan — CDR
-
-Paper tham chiếu: **"Supervised Object-Specific Distance Estimation from Monocular Images for Autonomous Driving"** (PMC9693490), phương pháp CDR (Convolutional Depth Regression), backbone ConvNeXt-small, huấn luyện supervised trên KITTI.
-
-| Phương pháp | Kiến trúc | Metric chính | Giá trị | Dataset |
+| Variant | Thành phần thêm | Epochs | GT train | Ghi chú |
 |---|---|---|---|---|
-| CDR | ConvNeXt + optics decoder | wMAE | 1.93 ± 0.03 m | KITTI |
-| Monodepth2 (baseline của CDR) | ResNet + decoder | wMAE | 2.28 m | KITTI |
-| **OGCDE v1 (ours)** | scratch YOLOv8n-scale | DE (MAE) | **1.107 m** | KITTI |
-| **OGCDE v4 (ours, pretrained)** | COCO YOLOv8n-scale | DE (MAE) | 1.348 m | KITTI |
+| **V1** | Baseline: det + depth trực tiếp | 300 | Annotation | Không có s-head, không CP |
+| **V2** | + Contact point prediction | 300 | Annotation | Thêm `L_cp` |
+| **V3** | + sec(θ) head (`s_raw`) | 300 | Annotation | Thêm `L_scale`, distance = exp(d+s) |
+| **V4** | + λ_geo warmup (5 epoch, 0.1→2.0) | 300 | Annotation | Giữ V3 config |
+| **V5** | + Per-class loss weights (full Phase 1) | 300 | Annotation | 1.0/3.0/5.0 (Car/Ped/Cyc) |
+| **V5\*** | + Stage-2 LiDAR fine-tune | 350+100 | **LiDAR** (Phase 2) | lr=1e-5, max_grad_norm=2.0 |
 
-**Lưu ý về so sánh:** CDR dùng wMAE (weighted MAE có trọng số theo khoảng cách) trên toàn bộ objects. OGCDE dùng DE (unweighted MAE) chỉ trên IoU>0.5 matched pairs — các objects không detect được không tính vào DE, khiến DE có lợi thế hơn wMAE về mặt tính toán. So sánh trực tiếp cần chạy cùng evaluation protocol.
+Phase 2 của V5\* fine-tune từ checkpoint V5 bằng **LiDAR 10th-percentile GT** (Zhu et al. method): 10th percentile distance của các LiDAR points nằm trong 3D bounding box. Đây là GT source chính xác hơn annotation vì loại bỏ bias từ occlusion và background points.
+
+#### Kết quả ablation
+
+Eval trên **distformer_val (3,769 ảnh)**, GT = annotation euclidean distance. OGCDE tự detect box (IoU≥0.5 matching); eval không dùng GT box.
+
+| Variant | AbsRel ↓ | δ<1.25 ↑ | n matched |
+|---|---|---|---|
+| V1: baseline | 13.09% | 86.96% | 16,814 |
+| V2: + contact point | 13.58% | 85.73% | 16,049 |
+| V3: + sec(θ) head | 12.92% | 88.27% | 15,723 |
+| V4: + λ_geo warmup | 13.87% | 86.98% | 14,504 |
+| **V5: + per-class weights** | **12.62%** | **89.72%** | 14,167 |
+| **V5\*: + LiDAR fine-tune** | **7.54%** | **96.74%** | 13,085 |
+
+**Nhận xét:**
+
+- **Contact point (V1→V2):** CP alone làm tăng AbsRel nhẹ (+0.49 pp). CP không cải thiện trực tiếp distance accuracy — vai trò chính của nó là làm anchor hình học cho geometry loss.
+- **sec(θ) head (V2→V3):** Bước cải thiện đơn lớn nhất trong Phase 1 (−0.66 pp AbsRel, +2.54 pp δ<1.25). Xác nhận bằng bearing angle analysis: từ 10° trở lên, V3 vượt V1 đến +0.81 pp.
+- **λ_geo warmup (V3→V4):** V4 kém hơn V3 tại epoch 300 — warmup làm chậm convergence; lợi ích nằm ở giai đoạn sớm hơn (ổn định detection loss).
+- **Synergy (V5):** Khi kết hợp tất cả components, V5 đạt AbsRel tốt nhất Phase 1 (12.62%) — các thành phần phụ trợ nhau dù từng bước riêng lẻ không đơn điệu.
+- **LiDAR fine-tune (V5\*):** Cải thiện lớn nhất: −5.08 pp AbsRel, từ 12.62% xuống **7.54%**. Stage-2 sử dụng GT chính xác hơn (LiDAR 10th-pct thay vì annotation Z).
+
+#### Lưu ý về eval protocol
+
+> **OGCDE detects boxes on its own** (IoU≥0.5 mode). Competing methods như DistFormer **nhận GT box làm input** — đây là lợi thế lớn vì tránh hoàn toàn false negative từ missed detections. Để so sánh công bằng hơn, OGCDE cũng được eval theo Oracle mode (query prediction tại center cell của GT box) — xem Section 4.4.
+
+### 4.4 So sánh với DistFormer và các phương pháp liên quan
+
+#### Evaluation protocol — lưu ý quan trọng
+
+| Phương pháp | Input box | GT source | Coverage |
+|---|---|---|---|
+| DistFormer | **GT box (given)** | LiDAR 10th-pct | 100% GT objects |
+| OGCDE (IoU mode) | **Own detection** | LiDAR 10th-pct | ~74–79% GT objects |
+| OGCDE (Oracle mode) | GT box (query) | LiDAR 10th-pct | 100% GT objects |
+
+DistFormer và các phương pháp trong bảng so sánh của nó (Zhu et al., DisNet, CenterNet, PatchNet) **đều nhận GT bounding box làm input** — tức là distance estimation được tách riêng khỏi detection. OGCDE tích hợp cả hai task trong một forward pass, không cần GT box tại inference. Đây là điểm khác biệt cơ bản khi so sánh số liệu.
+
+Để có so sánh công bằng hơn với DistFormer:
+- **Oracle mode**: query prediction tại center cell của GT box → tính distance trên 100% GT objects, tương đương về coverage.
+- **GT eval source**: cùng dùng LiDAR 10th-percentile distance (Zhu et al. method).
+
+#### Kết quả so sánh — DistFormer split, LiDAR GT, Car class
+
+| Phương pháp | Input box | AbsRel ↓ | δ<1.25 ↑ | RMSE ↓ |
+|---|---|---|---|---|
+| DistFormer | GT box | 10.39% | 93.67% | 2.950 m |
+| OGCDE LID-P2 (IoU) | Own det | **7.54%** | **96.74%** | 3.674 m |
+| OGCDE LID-P2 (Oracle) | GT box | 11.87% | 86.58% | 6.583 m |
+
+**Nhận xét:** OGCDE (IoU) có AbsRel tốt hơn DistFormer nhưng chỉ trên ~74% objects được detect. Oracle mode (coverage công bằng) kém DistFormer về AbsRel — phản ánh đúng hơn khả năng distance estimation thuần túy. RMSE cao ở Oracle do error tích lũy trên far/occluded objects mà IoU mode bỏ qua.
+
+#### So sánh với CDR
+
+Paper tham chiếu: **CDR** (PMC9693490), backbone ConvNeXt-small, wMAE metric.
+
+| Phương pháp | Kiến trúc | Metric | Giá trị | GT box? |
+|---|---|---|---|---|
+| CDR | ConvNeXt + optics decoder | wMAE | 1.93 m | Không rõ |
+| Monodepth2 | ResNet + decoder | wMAE | 2.28 m | — |
+| **OGCDE V5\* (ours)** | YOLOv8m COCO | DE (MAE, IoU) | — | Không |
+
+Metric khác nhau (wMAE vs DE), split khác nhau — không so sánh trực tiếp được.
 
 **Bối cảnh thêm từ YOLO MDE (Electronics 2022, MDPI):** Một pipeline tương tự (YOLOv4 + depth head) đạt mean error rate 3.71% trên KITTI 3D Object Detection, AP 71.68% (Car). OGCDE tiếp cận khác biệt ở chỗ không dùng depth map dày đặc làm trung gian.
 
