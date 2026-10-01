@@ -59,6 +59,12 @@ def parse_args():
     ap.add_argument("--save-dir", default="runs/ogcde")
     ap.add_argument("--distance-mode", default="euclidean",
                     choices=["euclidean", "depth"])
+    ap.add_argument("--detector", default="yolov8_custom",
+                    choices=["yolov8_custom", "fcos"],
+                    help="New detector interface selector. Legacy training path stays active for the current YOLO implementation.")
+    ap.add_argument("--distance-method", default="learned_scale",
+                    choices=["direct_distance", "learned_scale", "analytic_geometry", "geometry_residual"],
+                    help="Distance module for the detector-agnostic refactor.")
     ap.add_argument("--depth-mode", default="bottom_z",
                     choices=["bottom_z", "center_z"])
     ap.add_argument("--depth-source", default=None,
@@ -152,9 +158,22 @@ def main():
         with open(args.config) as f:
             cfg = yaml.safe_load(f)
         for k, v in cfg.items():
+            if isinstance(v, dict):
+                continue
             k_attr = k.replace("-", "_")
             if hasattr(args, k_attr):
                 setattr(args, k_attr, v)
+
+    if isinstance(getattr(args, "config", None), str):
+        try:
+            import yaml
+            with open(args.config) as f:
+                cfg = yaml.safe_load(f) or {}
+            for k, v in cfg.items():
+                if k in {"detector", "distance_method", "gt_source"}:
+                    setattr(args, k.replace("-", "_"), v)
+        except Exception:
+            pass
 
     # Seed for reproducibility
     if args.seed is not None:
