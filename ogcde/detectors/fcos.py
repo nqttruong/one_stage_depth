@@ -22,7 +22,7 @@ class FCOSDetectorAdapter(DetectorAdapter):
 
     name = "fcos"
 
-    def __init__(self, pretrained_backbone: bool = False):
+    def __init__(self, pretrained_backbone: bool = False, **kwargs):
         super().__init__()
         self._channels = (256, 256, 256, 256, 256)
         self._strides = (4, 8, 16, 32, 64)
@@ -30,6 +30,8 @@ class FCOSDetectorAdapter(DetectorAdapter):
             self.model = fcos_resnet50_fpn(pretrained=pretrained_backbone)
         else:
             self.model = nn.Identity()
+        self.nc = kwargs.get("nc", 3)
+        self.backbone_size = kwargs.get("backbone_size", "n")
 
     @property
     def feature_channels(self):

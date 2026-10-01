@@ -24,6 +24,8 @@ from torch.utils.data import DataLoader
 from ogcde.model import OGCDENet
 from ogcde.loss import OGCDELoss
 from ogcde.dataset import KITTIOGCDEDataset, collate_ogcde
+from ogcde.detectors import build_detector
+from ogcde.distance import build_distance_method
 
 
 def lambda_geo_schedule(epoch: int, warmup_epochs: int = 10,
@@ -149,31 +151,44 @@ def build_loaders(args):
     return train_loader, val_loader
 
 
+def apply_structured_config(args, cfg):
+    if not isinstance(cfg, dict):
+        return args
+    for section_name in ("dataset", "detector", "distance", "training", "augmentation", "experiment"):
+        section = cfg.get(section_name)
+        if isinstance(section, dict):
+            for key, value in section.items():
+                if section_name == "detector" and key == "name":
+                    setattr(args, "detector", value)
+                elif section_name == "distance" and key == "method":
+                    setattr(args, "distance_method", value)
+                elif section_name == "dataset" and key == "gt_source":
+                    setattr(args, "gt_source", value)
+                else:
+                    setattr(args, key.replace("-", "_"), value)
+    for key, value in cfg.items():
+        if key in {"dataset", "detector", "distance", "training", "augmentation", "experiment"}:
+            continue
+        if isinstance(value, dict):
+            continue
+        if hasattr(args, key.replace("-", "_")):
+            setattr(args, key.replace("-", "_"), value)
+    return args
+
+
 def main():
     args = parse_args()
 
-    # YAML config override (ablation convenience)
     if args.config is not None:
         import yaml
-        with open(args.config) as f:
-            cfg = yaml.safe_load(f)
-        for k, v in cfg.items():
-            if isinstance(v, dict):
-                continue
-            k_attr = k.replace("-", "_")
-            if hasattr(args, k_attr):
-                setattr(args, k_attr, v)
+        with open(args.config, "r", encoding="utf-8") as f:
+            cfg = yaml.safe_load(f) or {}
+        args = apply_structured_config(args, cfg)
 
-    if isinstance(getattr(args, "config", None), str):
-        try:
-            import yaml
-            with open(args.config) as f:
-                cfg = yaml.safe_load(f) or {}
-            for k, v in cfg.items():
-                if k in {"detector", "distance_method", "gt_source"}:
-                    setattr(args, k.replace("-", "_"), v)
-        except Exception:
-            pass
+    detector = build_detector(args.detector, nc=args.num_classes, backbone_size=args.backbone_size)
+    distance_method = build_distance_method(args.distance_method)
+    print(f"[config] detector={args.detector} distance={args.distance_method}")
+    print(f"[config] model={type(detector).__name__} distance_method={type(distance_method).__name__}")
 
     # Seed for reproducibility
     if args.seed is not None:

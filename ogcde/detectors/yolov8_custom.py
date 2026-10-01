@@ -15,7 +15,7 @@ class YoloV8CustomDetector(DetectorAdapter):
 
     name = "yolov8_custom"
 
-    def __init__(self, nc=3, backbone_size="n"):
+    def __init__(self, nc=3, backbone_size="n", **kwargs):
         super().__init__()
         self.model = OGCDENet(nc=nc, backbone_size=backbone_size)
 
