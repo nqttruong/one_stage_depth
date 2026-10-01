@@ -1,6 +1,0 @@
-variant,name,abs_rel,delta_1_25,n_matched,epoch
-v1_baseline,V1: det + direct depth,0.13093,0.869573,16814,60
-v2_cp,V2: + contact point,0.135777,0.85725,16049,64
-v3_sec_theta,V3: + sec(θ) head,0.129174,0.882656,15723,217
-v4_warmup,V4: + λ_geo warmup,0.138697,0.869829,14504,299
-v5_full,V5: + per-class weights (full),0.1262,0.8972,14167,332
