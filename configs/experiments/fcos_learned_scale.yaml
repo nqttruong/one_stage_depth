@@ -1,17 +1,31 @@
-detector: fcos
-distance_method: learned_scale
-img_size: 640
-batch_size: 16
-epochs: 50
-lr: 0.0001
-weight_decay: 0.0005
-optimizer: AdamW
-seed: 0
-train_split: splits/kitti_train.txt
-val_split: splits/kitti_val.txt
-kitti_root: /data/kitti/training
+experiment:
+  name: fcos_learned_scale
+  seed: 0
+
+dataset:
+  name: kitti
+  root: /data/kitti/training
+  train_split: splits/kitti_train.txt
+  val_split: splits/kitti_val.txt
+  gt_source: annotation_bottom_center
+  filter_difficult: true
+
+detector:
+  name: fcos
+
+distance:
+  method: learned_scale
+
 augmentation:
-  hflip: false
-  strong_aug: false
+  color_jitter: false
+  horizontal_flip: false
+  random_crop: false
   mosaic: false
-gt_source: annotation_bottom_center
+
+training:
+  img_size: 640
+  batch_size: 16
+  epochs: 50
+  optimizer: AdamW
+  lr: 0.0001
+  weight_decay: 0.0005

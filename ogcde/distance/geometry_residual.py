@@ -12,11 +12,13 @@ class GeometryResidualMethod(DistanceMethod):
     output_dim = 2
 
     def decode(self, logits: torch.Tensor, intrinsics=None, box_center=None, **kwargs) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if intrinsics is None:
+            raise ValueError("GeometryResidual requires intrinsics_network")
+        if box_center is None:
+            raise ValueError("GeometryResidual requires transformed box centers")
         log_z = logits[..., 0]
         delta = logits[..., 1]
         z = torch.exp(log_z.clamp(min=-5.0, max=6.0))
-        if intrinsics is None or box_center is None:
-            return z, torch.ones_like(z), z
         u = box_center[..., 0]
         v = box_center[..., 1]
         s_geo = torch.sqrt(1.0 + ((u - intrinsics.cx) / intrinsics.fx) ** 2 + ((v - intrinsics.cy) / intrinsics.fy) ** 2)
@@ -24,10 +26,12 @@ class GeometryResidualMethod(DistanceMethod):
         return z, s_geo, d
 
     def target_from_gt(self, z_gt: torch.Tensor, dist_gt: torch.Tensor, intrinsics=None, box_center=None, **kwargs) -> torch.Tensor:
+        if intrinsics is None:
+            raise ValueError("GeometryResidual requires intrinsics_network")
+        if box_center is None:
+            raise ValueError("GeometryResidual requires transformed box centers")
         z = z_gt.clamp_min(1e-6)
         s_gt = (dist_gt / z).clamp_min(1e-6)
-        if intrinsics is None or box_center is None:
-            return torch.stack([torch.log(z), torch.log(s_gt)], dim=-1)
         u = box_center[..., 0]
         v = box_center[..., 1]
         s_geo = torch.sqrt(1.0 + ((u - intrinsics.cx) / intrinsics.fx) ** 2 + ((v - intrinsics.cy) / intrinsics.fy) ** 2)

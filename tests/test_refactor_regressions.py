@@ -49,3 +49,24 @@ def test_camera_ray_equivalence_for_resize():
     ray_new = (u_new - resized.cx) / resized.fx, (v_new - resized.cy) / resized.fy
     assert abs(ray_original[0] - ray_new[0]) < 1e-6
     assert abs(ray_original[1] - ray_new[1]) < 1e-6
+
+
+def test_letterbox_intrinsics_are_scaled_once():
+    intr = CameraIntrinsics(fx=700.0, fy=700.0, cx=320.0, cy=240.0)
+    letterboxed = intr.letterbox(0.5, (16.0, 8.0))
+    assert abs(letterboxed.fx - 350.0) < 1e-6
+    assert abs(letterboxed.fy - 350.0) < 1e-6
+    assert abs(letterboxed.cx - 176.0) < 1e-6
+    assert abs(letterboxed.cy - 128.0) < 1e-6
+
+
+def test_hflip_then_letterbox_preserves_both_transforms():
+    intr = CameraIntrinsics(fx=500.0, fy=600.0, cx=320.0, cy=240.0)
+    flipped = intr.hflip(640.0)
+    letterboxed = flipped.letterbox(0.5, (32.0, 16.0))
+    expected = CameraIntrinsics(fx=250.0, fy=300.0, cx=640.0 - 320.0, cy=240.0)
+    expected = CameraIntrinsics(fx=250.0, fy=300.0, cx=expected.cx * 0.5 + 32.0, cy=expected.cy * 0.5 + 16.0)
+    assert abs(letterboxed.fx - 250.0) < 1e-6
+    assert abs(letterboxed.fy - 300.0) < 1e-6
+    assert abs(letterboxed.cx - (320.0 * 0.5 + 32.0)) < 1e-6
+    assert abs(letterboxed.cy - (240.0 * 0.5 + 16.0)) < 1e-6

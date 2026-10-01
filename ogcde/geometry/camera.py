@@ -48,6 +48,14 @@ class CameraIntrinsics:
             cy=self.cy * scale + py,
         )
 
+    def with_scale(self, scale: float) -> "CameraIntrinsics":
+        return CameraIntrinsics(
+            fx=self.fx * scale,
+            fy=self.fy * scale,
+            cx=self.cx * scale,
+            cy=self.cy * scale,
+        )
+
     def hflip(self, width: float) -> "CameraIntrinsics":
         """Mirror the image horizontally while keeping the same convention.
 

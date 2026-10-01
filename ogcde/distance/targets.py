@@ -37,11 +37,12 @@ def geometry_residual_target(
     delta_log_s_gt = log(D/Z) - log(s_geo)
                   = log((D/Z) / s_geo)
     """
+    if intrinsics is None:
+        raise ValueError("GeometryResidual requires intrinsics_network")
+    if box_center is None:
+        raise ValueError("GeometryResidual requires transformed box centers")
     z = z_gt.clamp_min(eps)
     s_gt = (distance_gt / z).clamp_min(eps)
-    if intrinsics is None or box_center is None:
-        return torch.stack([_safe_log(z, eps), _safe_log(s_gt, eps)], dim=-1)
-
     u = box_center[..., 0]
     v = box_center[..., 1]
     s_geo = torch.sqrt(1.0 + ((u - intrinsics.cx) / intrinsics.fx) ** 2 + ((v - intrinsics.cy) / intrinsics.fy) ** 2)

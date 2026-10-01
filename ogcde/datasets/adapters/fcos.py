@@ -6,12 +6,16 @@ import torch
 
 
 class FCOSTargetAdapter:
-    """Convert the canonical physical target to an FCOS-style list of per-image dicts."""
+    """Convert the canonical physical target to FCOS-style per-image targets."""
 
-    def __call__(self, target: Dict[str, torch.Tensor]):
-        return [{
-            "boxes": target["boxes"],
-            "labels": target["labels"],
-            "z_gt": target["z_gt"],
-            "distance_gt": target["distance_gt"],
-        }]
+    def __call__(self, targets):
+        if isinstance(targets, dict):
+            targets = [targets]
+        converted = []
+        for target in targets:
+            entry = {
+                "boxes": target["boxes"],
+                "labels": target["labels"],
+            }
+            converted.append(entry)
+        return converted

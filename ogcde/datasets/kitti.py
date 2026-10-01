@@ -168,6 +168,9 @@ class KITTIDistanceDataset(BaseDistanceDataset):
         target["boxes"] = boxes
 
         h, w = image.shape[:2]
+        pad_x = 0.0
+        pad_y = 0.0
+        scale = 1.0
         if self.img_size is not None and self.img_size > 0:
             scale = min(self.img_size / float(h), self.img_size / float(w))
             new_w = max(1, int(round(w * scale)))
@@ -188,7 +191,7 @@ class KITTIDistanceDataset(BaseDistanceDataset):
                 boxes[:, 2] += pad_x
                 boxes[:, 1] += pad_y
                 boxes[:, 3] += pad_y
-            intrinsics_network = intrinsics_original.resize(float(scale), float(scale)).letterbox(float(scale), (float(pad_x), float(pad_y)))
+            intrinsics_network = intrinsics_network.letterbox(float(scale), (float(pad_x), float(pad_y)))
             target["boxes"] = boxes
         target["boxes"] = torch.as_tensor(target["boxes"], dtype=torch.float32)
         target["labels"] = torch.as_tensor(target["labels"], dtype=torch.int64)

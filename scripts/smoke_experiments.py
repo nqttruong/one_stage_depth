@@ -6,6 +6,7 @@ import tempfile
 from pathlib import Path
 
 import numpy as np
+import torch
 from PIL import Image
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -46,8 +47,17 @@ def main():
                 dataset = KITTIDistanceDataset(str(root), str(root / "split.txt"), img_size=64, augment=False, hflip=False)
                 image, target, meta = dataset[0]
                 assert set(target.keys()) >= {"boxes", "labels", "z_gt", "distance_gt", "loc3d", "object_ids"}
-                YOLOTargetAdapter()(target)
-                FCOSTargetAdapter()(target)
+                yolo_batch = YOLOTargetAdapter()([target])
+                fcos_batch = FCOSTargetAdapter()([target])
+                assert yolo_batch["batch_idx"].tolist() == [0]
+                assert len(fcos_batch) == 1
+
+                from ogcde.distance.base import DistanceDetectionModel
+                model = DistanceDetectionModel(detector=detector, distance_method=method)
+                logits = model(image.unsqueeze(0))
+                loss = model.compute_loss(logits, [target], [meta])
+                loss.backward()
+                assert torch.isfinite(loss)
                 print(f"PASS {detector_name} + {method_name}")
 
 
